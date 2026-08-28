@@ -1,0 +1,6 @@
+streamlit
+pandas
+xmltodict
+fpdf2
+requests
+beautifulsoup4

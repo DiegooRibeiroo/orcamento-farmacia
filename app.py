@@ -51,9 +51,9 @@ init_db()
 
 # Funções Auxiliares de Cálculo
 def calcular_custo_e_preco(custo_unit, icms=0, ipi=0, pis_cofins=0, margem=30):
-    custo_final = custo_unit * (1 + (icms + ipi + pis_cofins) / 100)
-    preco_venda = custo_final * (1 + margem / 100)
-    return round(custo_final, 2), round(preco_venda, 2)
+    custo_final = round(custo_unit * (1 + (icms + ipi + pis_cofins) / 100), 2)
+    preco_venda = round(custo_final * (1 + margem / 100), 2)
+    return custo_final, preco_venda
 
 # Sessão para Orçamento Atual
 if 'orcamento_itens' not in st.session_state:
@@ -86,7 +86,7 @@ with st.sidebar:
                     codigo = prod.get('cProd', '')
                     nome = prod.get('xProd', '').upper()
                     ncm = prod.get('NCM', '')
-                    v_un = float(prod.get('vUnCom', 0))
+                    v_un = round(float(prod.get('vUnCom', 0)), 2)
                     
                     custo_final, preco_venda = calcular_custo_e_preco(v_un, margem=30)
                     
@@ -109,7 +109,7 @@ with st.sidebar:
             m_cod = st.text_input("Código")
             m_nome = st.text_input("Nome do Produto").upper()
             m_forn = st.text_input("Fornecedor")
-            m_custo = st.number_input("Custo Unitário (R$)", min_value=0.0, step=0.1)
+            m_custo = st.number_input("Custo Unitário (R$)", min_value=0.0, step=0.1, format="%.2f")
             m_margem = st.number_input("Margem de Lucro (%)", value=30.0, step=1.0)
             
             if st.form_submit_button("Salvar no Banco", use_container_width=True):
@@ -119,7 +119,7 @@ with st.sidebar:
                     conn.execute('''
                         INSERT INTO produtos (codigo, nome, fornecedor, custo_unitario, custo_final, margem_lucro, preco_venda, data_entrada)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (m_cod, m_nome, m_forn, m_custo, c_fin, m_margem, p_vend, str(datetime.now().date())))
+                    ''', (m_cod, m_nome, m_forn, round(m_custo, 2), c_fin, m_margem, p_vend, str(datetime.now().date())))
                     conn.commit()
                     conn.close()
                     st.success("Item cadastrado com sucesso!")
@@ -148,7 +148,7 @@ with tab1:
         if df_prods.empty:
             st.info("Nenhum produto cadastrado ainda. Suba XMLs na barra lateral.")
         else:
-            df_prods['display'] = df_prods['nome'] + " | Fornec: " + df_prods['fornecedor'].fillna('') + " | Custo: R$ " + df_prods['custo_unitario'].astype(str)
+            df_prods['display'] = df_prods['nome'] + " | Fornec: " + df_prods['fornecedor'].fillna('') + " | Custo: R$ " + df_prods['custo_unitario'].apply(lambda x: f"{float(x):.2f}")
             escolha = st.selectbox("Selecione o medicamento:", options=df_prods['display'].tolist())
             
             if escolha:
@@ -156,14 +156,14 @@ with tab1:
                 
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Custo Base", f"R$ {item_sel['custo_unitario']:.2f}")
+                    st.metric("Custo Base", f"R$ {float(item_sel['custo_unitario']):.2f}")
                 with col2:
                     qtd = st.number_input("Quantidade", min_value=1, value=1, step=1)
                 with col3:
                     margem_orc = st.number_input("Margem (%)", value=float(item_sel['margem_lucro']), step=1.0)
                 with col4:
-                    _, preco_sugerido = calcular_custo_e_preco(item_sel['custo_unitario'], margem=margem_orc)
-                    preco_venda_orc = st.number_input("Preço Unit. Venda (R$)", value=preco_sugerido, step=0.1)
+                    _, preco_sugerido = calcular_custo_e_preco(float(item_sel['custo_unitario']), margem=margem_orc)
+                    preco_venda_orc = st.number_input("Preço Unit. Venda (R$)", value=preco_sugerido, step=0.1, format="%.2f")
                 
                 subtotal = round(preco_venda_orc * qtd, 2)
                 st.write(f"**Subtotal do Item:** R$ {subtotal:.2f}")
@@ -173,7 +173,7 @@ with tab1:
                         "codigo": item_sel['codigo'],
                         "nome": item_sel['nome'],
                         "fornecedor": item_sel['fornecedor'],
-                        "custo_unit": item_sel['custo_unitario'],
+                        "custo_unit": float(item_sel['custo_unitario']),
                         "margem": margem_orc,
                         "preco_venda": preco_venda_orc,
                         "qtd": qtd,
@@ -188,11 +188,11 @@ with tab1:
             nome_avulso = st.text_input("Nome do Produto / Descrição").upper()
             qtd_avulso = st.number_input("Quantidade", min_value=1, value=1, step=1, key="qtd_av")
         with col_m2:
-            custo_avulso = st.number_input("Custo Unitário (R$)", min_value=0.0, step=0.1, key="custo_av")
+            custo_avulso = st.number_input("Custo Unitário (R$)", min_value=0.0, step=0.1, format="%.2f", key="custo_av")
             margem_avulso = st.number_input("Margem (%)", value=30.0, step=1.0, key="marg_av")
             
         _, preco_sug_avulso = calcular_custo_e_preco(custo_avulso, margem=margem_avulso)
-        preco_venda_av = st.number_input("Preço Unit. Venda (R$)", value=preco_sug_avulso, step=0.1, key="pv_av")
+        preco_venda_av = st.number_input("Preço Unit. Venda (R$)", value=preco_sug_avulso, step=0.1, format="%.2f", key="pv_av")
         subtotal_av = round(preco_venda_av * qtd_avulso, 2)
         
         if st.button("➕ Adicionar Item Avulso", use_container_width=True):
@@ -263,10 +263,10 @@ with tab2:
             
             pdf.set_font("Arial", '', 10)
             for item in itens:
-                pdf.cell(100, 8, item['nome'][:40], border=1)
+                pdf.cell(100, 8, str(item['nome'])[:40], border=1)
                 pdf.cell(25, 8, str(item['qtd']), border=1, align="C")
-                pdf.cell(30, 8, f"{item['preco_venda']:.2f}", border=1, align="R")
-                pdf.cell(35, 8, f"{item['subtotal']:.2f}", border=1, align="R")
+                pdf.cell(30, 8, f"{float(item['preco_venda']):.2f}", border=1, align="R")
+                pdf.cell(35, 8, f"{float(item['subtotal']):.2f}", border=1, align="R")
                 pdf.ln()
                 
             pdf.set_font("Arial", 'B', 11)

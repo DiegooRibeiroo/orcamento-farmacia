@@ -1,429 +1,391 @@
 import streamlit as st
+import sqlite3
 import pandas as pd
 import xmltodict
-import sqlite3
-import urllib.parse
 from fpdf import FPDF
+from datetime import datetime
+import io
 
-st.set_page_config(page_title="Gestão de Orçamentos Farmacêuticos", layout="wide")
+# Configuração da Página
+st.set_page_config(page_title="Gestão & Orçamentos - Farmácia", layout="wide", page_icon="💊")
 
-# Conexão com banco local SQLite
-conn = sqlite3.connect("farmacia.db", check_same_thread=False)
+# Conexão com o Banco SQLite
+def get_db_connection():
+    conn = sqlite3.connect('farmacia.db', check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
-    with conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS compras (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chave_acesso TEXT,
-                nfe_numero TEXT,
-                data_emissao TEXT,
-                fornecedor TEXT,
-                codigo_produto TEXT,
-                descricao TEXT,
-                ncm TEXT,
-                quantidade REAL,
-                valor_unitario REAL,
-                valor_total REAL,
-                UNIQUE(chave_acesso, codigo_produto)
-            )
-        """)
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS produtos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo TEXT,
+            nome TEXT,
+            fornecedor TEXT,
+            ncm TEXT,
+            custo_unitario REAL,
+            icms REAL DEFAULT 0,
+            ipi REAL DEFAULT 0,
+            pis_cofins REAL DEFAULT 0,
+            custo_final REAL,
+            margem_lucro REAL DEFAULT 30,
+            preco_venda REAL,
+            data_entrada TEXT
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS orcamentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cliente TEXT,
+            data TEXT,
+            total REAL,
+            itens_json TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 init_db()
 
-# Inicialização do carrinho
-if 'carrinho' not in st.session_state:
-    st.session_state.carrinho = []
+# Funções Auxiliares de Cálculo
+def calcular_custo_e_preco(custo_unit, icms=0, ipi=0, pis_cofins=0, margem=30):
+    custo_final = custo_unit * (1 + (icms + ipi + pis_cofins) / 100)
+    preco_venda = custo_final * (1 + margem / 100)
+    return round(custo_final, 2), round(preco_venda, 2)
 
-def extrair_tag(dados, chave):
-    if isinstance(dados, dict):
-        for k, v in dados.items():
-            if k.endswith(chave) or k == chave:
-                return v
-            res = extrair_tag(v, chave)
-            if res is not None:
-                return res
-    elif isinstance(dados, list):
-        for item in dados:
-            res = extrair_tag(item, chave)
-            if res is not None:
-                return res
-    return None
-
-def processar_xml(xml_file):
-    try:
-        dados = xmltodict.parse(xml_file.getvalue(), process_namespaces=False)
-        inf_nfe = extrair_tag(dados, 'infNFe')
-        if not inf_nfe:
-            return False, 0, "Estrutura 'infNFe' não encontrada."
-            
-        chave_acesso = str(inf_nfe.get('@Id', '')).replace('NFe', '')
-        ide = inf_nfe.get('ide', {})
-        emit = inf_nfe.get('emit', {})
-        
-        numero_nfe = str(ide.get('nNF', 'S/N'))
-        data_emissao = str(ide.get('dhEmi', ide.get('dEmi', '')))[:10]
-        fornecedor = str(emit.get('xNome', 'Desconhecido'))
-        
-        detalhes = inf_nfe.get('det', [])
-        if isinstance(detalhes, dict):
-            detalhes = [detalhes]
-            
-        itens = []
-        for det in detalhes:
-            prod = det.get('prod', {})
-            itens.append((
-                chave_acesso,
-                numero_nfe,
-                data_emissao,
-                fornecedor,
-                str(prod.get('cProd', '')),
-                str(prod.get('xProd', '')),
-                str(prod.get('NCM', '')),
-                float(prod.get('qCom', 0) or 0),
-                float(prod.get('vUnCom', 0) or 0),
-                float(prod.get('vProd', 0) or 0)
-            ))
-            
-        inseridos = 0
-        with conn:
-            for item in itens:
-                cursor = conn.execute("""
-                    INSERT OR IGNORE INTO compras (
-                        chave_acesso, nfe_numero, data_emissao, fornecedor, 
-                        codigo_produto, descricao, ncm, quantidade, valor_unitario, valor_total
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, item)
-                if cursor.rowcount > 0:
-                    inseridos += 1
-
-        return True, inseridos, ""
-    except Exception as e:
-        return False, 0, str(e)
-
-def gerar_links_pesquisa(termo):
-    termo_limpo = " ".join([p for p in termo.split() if len(p) > 2][:4])
-    termo_encoded = urllib.parse.quote_plus(termo_limpo)
-    return {
-        "Google Shopping": f"https://www.google.com/search?tbm=shop&q={termo_encoded}",
-        "Consulta Remédios": f"https://consultaremedios.com.br/busca?termo={termo_encoded}",
-        "Mercado Livre": f"https://lista.mercadolivre.com.br/{termo_encoded}",
-        "Drogasil": f"https://www.drogasil.com.br/search?w={termo_encoded}",
-        "Ultrafarma": f"https://www.ultrafarma.com.br/busca?q={termo_encoded}"
-    }
-
-def gerar_pdf(cliente, itens, total_venda):
-    pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    
-    # Título Principal
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(190, 10, "ORÇAMENTO DE MEDICAMENTOS E INSUMOS", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
-    
-    # Cabeçalho do Cliente e Data
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(120, 6, f"Cliente: {cliente if cliente else 'Consumidor / Farmácia'}", align="L")
-    pdf.cell(70, 6, f"Data: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}", align="R", new_x="LMARGIN", new_y="NEXT")
-    
-    # Linha divisória
-    pdf.set_draw_color(180, 180, 180)
-    pdf.line(10, pdf.get_y() + 2, 200, pdf.get_y() + 2)
-    pdf.ln(6)
-    
-    # Cabeçalho da Tabela
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.set_fill_color(240, 240, 240)
-    pdf.cell(90, 8, " Descrição", border=1, fill=True)
-    pdf.cell(15, 8, "Unid", border=1, align="C", fill=True)
-    pdf.cell(20, 8, "Qtd", border=1, align="C", fill=True)
-    pdf.cell(32, 8, "Unitário (R$)", border=1, align="R", fill=True)
-    pdf.cell(33, 8, "Total (R$)", border=1, align="R", fill=True, new_x="LMARGIN", new_y="NEXT")
-    
-    # Itens do Orçamento
-    pdf.set_font("Helvetica", "", 9)
-    for item in itens:
-        nome_prod = " " + ((item['produto'][:42] + '..') if len(item['produto']) > 45 else item['produto'])
-        qtd_formatada = f"{int(item['quantidade']):,}".replace(",", ".") if float(item['quantidade']).is_integer() else f"{item['quantidade']:.2f}"
-        
-        pdf.cell(90, 7, nome_prod, border=1)
-        pdf.cell(15, 7, item.get('unidade', 'UN'), border=1, align="C")
-        pdf.cell(20, 7, qtd_formatada, border=1, align="C")
-        pdf.cell(32, 7, f"R$ {item['preco_venda_unit']:.2f} ", border=1, align="R")
-        pdf.cell(33, 7, f"R$ {item['total_item']:.2f} ", border=1, align="R", new_x="LMARGIN", new_y="NEXT")
-        
-    pdf.ln(4)
-    
-    # Total Geral
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(157, 9, "VALOR TOTAL DO ORÇAMENTO: ", align="R")
-    pdf.set_fill_color(230, 242, 255)
-    pdf.cell(33, 9, f"R$ {total_venda:.2f} ", border=1, align="R", fill=True, new_x="LMARGIN", new_y="NEXT")
-    
-    return bytes(pdf.output())
-
-# --- MENU LATERAL ---
-with st.sidebar:
-    st.header("📥 Importação de Notas")
-    arquivos_xml = st.file_uploader("Suba os arquivos XML", type=["xml"], accept_multiple_files=True)
-    if st.button("Processar Arquivos") and arquivos_xml:
-        total_novos = 0
-        erros = []
-        for f in arquivos_xml:
-            sucesso, novos, erro = processar_xml(f)
-            if sucesso:
-                total_novos += novos
-            else:
-                erros.append(f"{f.name}: {erro}")
-                
-        if total_novos > 0:
-            st.success(f"{total_novos} novos itens adicionados ao banco!")
-        else:
-            st.info("Nenhum item novo adicionado (notas já importadas).")
-            
-        if erros:
-            for erro in erros:
-                st.error(erro)
-                
-    st.divider()
-    with st.expander("✍️ Cadastrar Preço Manual no Banco"):
-        with st.form("form_manual"):
-            prod_manual = st.text_input("Nome do Produto:")
-            forn_manual = st.text_input("Fornecedor / Origem:", value="Entrada Manual")
-            custo_manual = st.number_input("Custo Unitário (R$):", min_value=0.01, value=1.00, step=0.10)
-            btn_salvar_manual = st.form_submit_button("Salvar no Banco")
-            
-            if btn_salvar_manual and prod_manual:
-                data_hoje = pd.Timestamp.now().strftime('%Y-%m-%d')
-                chave_fake = f"MANUAL_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}"
-                with conn:
-                    conn.execute("""
-                        INSERT INTO compras (chave_acesso, nfe_numero, data_emissao, fornecedor, codigo_produto, descricao, ncm, quantidade, valor_unitario, valor_total)
-                        VALUES (?, 'MANUAL', ?, ?, 'MANUAL', ?, '00000000', 1, ?, ?)
-                    """, (chave_fake, data_hoje, forn_manual, prod_manual.upper(), custo_manual, custo_manual))
-                st.success("Item manual cadastrado com sucesso!")
-                st.rerun()
+# Sessão para Orçamento Atual
+if 'orcamento_itens' not in st.session_state:
+    st.session_state.orcamento_itens = []
 
 st.title("💊 Sistema de Gestão de Custos e Orçamentos")
 
-tab_busca, tab_orcamento, tab_banco = st.tabs(["🔍 Inserir Produto no Orçamento", "📋 Orçamento Atual", "🗄️ Histórico Completo"])
+# ----------------- SIDEBAR: IMPORTAÇÃO E CADASTRO -----------------
+with st.sidebar:
+    st.header("📥 Importação de Notas (XML)")
+    uploaded_files = st.file_uploader("Suba os arquivos XML da NF-e", type=["xml"], accept_multiple_files=True)
+    
+    if st.button("Processar Arquivos", use_container_width=True) and uploaded_files:
+        conn = get_db_connection()
+        c = conn.cursor()
+        total_importados = 0
+        
+        for file in uploaded_files:
+            try:
+                doc = xmltodict.parse(file.read())
+                nfe_data = doc['nfeProc']['NFe']['infNFe'] if 'nfeProc' in doc else doc['NFe']['infNFe']
+                fornecedor = nfe_data['emit']['xNome']
+                data_emissao = nfe_data['ide']['dhEmi'][:10] if 'dhEmi' in nfe_data['ide'] else str(datetime.now().date())
+                
+                det = nfe_data['det']
+                itens = det if isinstance(det, list) else [det]
+                
+                for item in itens:
+                    prod = item['prod']
+                    codigo = prod.get('cProd', '')
+                    nome = prod.get('xProd', '').upper()
+                    ncm = prod.get('NCM', '')
+                    v_un = float(prod.get('vUnCom', 0))
+                    
+                    custo_final, preco_venda = calcular_custo_e_preco(v_un, margem=30)
+                    
+                    c.execute('''
+                        INSERT INTO produtos (codigo, nome, fornecedor, ncm, custo_unitario, custo_final, margem_lucro, preco_venda, data_entrada)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (codigo, nome, fornecedor, ncm, v_un, custo_final, 30.0, preco_venda, data_emissao))
+                    total_importados += 1
+            except Exception as e:
+                st.error(f"Erro ao processar {file.name}: {e}")
+                
+        conn.commit()
+        conn.close()
+        st.success(f"{total_importados} produtos importados com sucesso!")
+        st.rerun()
 
-# --- ABA 1: INSERIR PRODUTO ---
-with tab_busca:
+    st.markdown("---")
+    with st.expander("✍️ Cadastrar Preço Manual no Banco"):
+        with st.form("form_manual"):
+            m_cod = st.text_input("Código")
+            m_nome = st.text_input("Nome do Produto").upper()
+            m_forn = st.text_input("Fornecedor")
+            m_custo = st.number_input("Custo Unitário (R$)", min_value=0.0, step=0.1)
+            m_margem = st.number_input("Margem de Lucro (%)", value=30.0, step=1.0)
+            
+            if st.form_submit_button("Salvar no Banco", use_container_width=True):
+                if m_nome and m_custo > 0:
+                    c_fin, p_vend = calcular_custo_e_preco(m_custo, margem=m_margem)
+                    conn = get_db_connection()
+                    conn.execute('''
+                        INSERT INTO produtos (codigo, nome, fornecedor, custo_unitario, custo_final, margem_lucro, preco_venda, data_entrada)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (m_cod, m_nome, m_forn, m_custo, c_fin, m_margem, p_vend, str(datetime.now().date())))
+                    conn.commit()
+                    conn.close()
+                    st.success("Item cadastrado com sucesso!")
+                    st.rerun()
+                else:
+                    st.warning("Preencha o nome e o custo.")
+
+# ----------------- ABAS PRINCIPAIS -----------------
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🔍 Inserir no Orçamento", 
+    "📋 Orçamento Atual", 
+    "📊 Histórico & Tabela",
+    "⚙️ Ajuste de Preço em Massa"
+])
+
+# ABA 1: Inserir no Orçamento
+with tab1:
     st.subheader("1. Inserir Produto no Orçamento")
+    origem = st.radio("Origem do Produto:", ["📦 Buscar nas Notas Fiscais (XML)", "✍️ Digitar Item Avulso / Manual"], horizontal=True)
     
-    tipo_insercao = st.radio("Origem do Produto:", ["📦 Buscar nas Notas Fiscais (XML)", "✍️ Digitar Item Avulso / Manual"], horizontal=True)
+    conn = get_db_connection()
+    df_prods = pd.read_sql_query("SELECT * FROM produtos ORDER BY id DESC", conn)
+    conn.close()
     
-    if tipo_insercao == "📦 Buscar nas Notas Fiscais (XML)":
-        produtos_unicos = pd.read_sql_query("SELECT DISTINCT descricao FROM compras ORDER BY descricao", conn)['descricao'].tolist()
-        
-        selecionado = st.selectbox("Selecione ou digite o medicamento:", [""] + produtos_unicos)
-        
-        if selecionado:
-            nome_final = selecionado
-            df_historico = pd.read_sql_query("""
-                SELECT data_emissao AS "Data", fornecedor AS "Fornecedor", quantidade AS "Qtd Comprada", valor_unitario AS "Custo Unit. (R$)"
-                FROM compras 
-                WHERE descricao = ?
-                ORDER BY data_emissao DESC
-            """, conn, params=[selecionado])
-            
-            st.write("**Histórico de Compras (XMLs):**")
-            st.dataframe(df_historico.style.format({
-                "Qtd Comprada": "{:,.0f}".format,
-                "Custo Unit. (R$)": "R$ {:.2f}".format
-            }), use_container_width=True)
-            
-            ultimo_custo_sugerido = float(df_historico.iloc[0]['Custo Unit. (R$)'])
-            
-            # Links de Pesquisa Web
-            with st.expander("🌐 Pesquisar Preço Geral na Internet (1 Clique)", expanded=False):
-                termo_web = st.text_input("Termo de pesquisa:", value=selecionado)
-                links = gerar_links_pesquisa(termo_web)
-                
-                col_l1, col_l2, col_l3, col_l4, col_l5 = st.columns(5)
-                col_l1.link_button("🛍️ Google Shopping", links["Google Shopping"])
-                col_l2.link_button("💊 Consulta Remédios", links["Consulta Remédios"])
-                col_l3.link_button("📦 Mercado Livre", links["Mercado Livre"])
-                col_l4.link_button("🔴 Drogasil", links["Drogasil"])
-                col_l5.link_button("🔵 Ultrafarma", links["Ultrafarma"])
+    if origem == "📦 Buscar nas Notas Fiscais (XML)":
+        if df_prods.empty:
+            st.info("Nenhum produto cadastrado ainda. Suba XMLs na barra lateral.")
         else:
-            nome_final = ""
-            ultimo_custo_sugerido = 0.00
+            df_prods['display'] = df_prods['nome'] + " | Fornec: " + df_prods['fornecedor'].fillna('') + " | Custo: R$ " + df_prods['custo_unitario'].astype(str)
+            escolha = st.selectbox("Selecione o medicamento:", options=df_prods['display'].tolist())
             
-    else:
-        # Modo Manual Avulso
-        nome_final = st.text_input("Nome do Produto / Medicamento:", placeholder="Ex: TYLENOL 750MG COMPRIMIDOS").upper()
-        ultimo_custo_sugerido = 1.00
+            if escolha:
+                item_sel = df_prods[df_prods['display'] == escolha].iloc[0]
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Custo Base", f"R$ {item_sel['custo_unitario']:.2f}")
+                with col2:
+                    qtd = st.number_input("Quantidade", min_value=1, value=1, step=1)
+                with col3:
+                    margem_orc = st.number_input("Margem (%)", value=float(item_sel['margem_lucro']), step=1.0)
+                with col4:
+                    _, preco_sugerido = calcular_custo_e_preco(item_sel['custo_unitario'], margem=margem_orc)
+                    preco_venda_orc = st.number_input("Preço Unit. Venda (R$)", value=preco_sugerido, step=0.1)
+                
+                subtotal = round(preco_venda_orc * qtd, 2)
+                st.write(f"**Subtotal do Item:** R$ {subtotal:.2f}")
+                
+                if st.button("➕ Adicionar ao Orçamento", use_container_width=True):
+                    st.session_state.orcamento_itens.append({
+                        "codigo": item_sel['codigo'],
+                        "nome": item_sel['nome'],
+                        "fornecedor": item_sel['fornecedor'],
+                        "custo_unit": item_sel['custo_unitario'],
+                        "margem": margem_orc,
+                        "preco_venda": preco_venda_orc,
+                        "qtd": qtd,
+                        "subtotal": subtotal
+                    })
+                    st.success(f"{item_sel['nome']} adicionado ao orçamento!")
+                    st.rerun()
 
-    if nome_final:
-        st.write("---")
-        st.write("### 📦 Como você vai vender este item?")
-        
-        modo_conversao = st.radio(
-            "Selecione o formato da venda:",
-            [
-                "🟢 Preço Direto (Sem conversão - o custo já é por unidade/caixa)",
-                "🔵 Multiplicar (O custo registrado é unitário, mas vou vender a Caixa Fechada)",
-                "🟠 Dividir (O custo registrado é da Caixa Fechada, mas vou vender Fracionado/Unidade)"
-            ]
-        )
-        
-        col_c1, col_c2, col_c3 = st.columns(3)
-        
-        with col_c1:
-            custo_base_input = st.number_input(
-                "Custo de Origem (R$):", 
-                min_value=0.01, 
-                value=ultimo_custo_sugerido, 
-                step=0.10, 
-                format="%.2f",
-                help="Valor que veio na nota fiscal ou valor de compra de referência."
-            )
+    else:
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            nome_avulso = st.text_input("Nome do Produto / Descrição").upper()
+            qtd_avulso = st.number_input("Quantidade", min_value=1, value=1, step=1, key="qtd_av")
+        with col_m2:
+            custo_avulso = st.number_input("Custo Unitário (R$)", min_value=0.0, step=0.1, key="custo_av")
+            margem_avulso = st.number_input("Margem (%)", value=30.0, step=1.0, key="marg_av")
             
-        with col_c2:
-            if "Multiplicar" in modo_conversao:
-                unidade = "CX"
-                fator = st.number_input("Quantas unidades vêm dentro da Caixa?", min_value=1.0, value=100.0, step=10.0)
-                custo_final_calculado = custo_base_input * fator
-                st.info(f"💡 Cálculo: R$ {custo_base_input:.2f} × {int(fator)} un = **R$ {custo_final_calculado:.2f} por Caixa**")
-                
-            elif "Dividir" in modo_conversao:
-                unidade = "UN"
-                fator = st.number_input("Quantas unidades vêm dentro da Caixa para dividir?", min_value=1.0, value=100.0, step=10.0)
-                custo_final_calculado = custo_base_input / fator
-                st.info(f"💡 Cálculo: R$ {custo_base_input:.2f} ÷ {int(fator)} un = **R$ {custo_final_calculado:.2f} por Unidade**")
-                
+        _, preco_sug_avulso = calcular_custo_e_preco(custo_avulso, margem=margem_avulso)
+        preco_venda_av = st.number_input("Preço Unit. Venda (R$)", value=preco_sug_avulso, step=0.1, key="pv_av")
+        subtotal_av = round(preco_venda_av * qtd_avulso, 2)
+        
+        if st.button("➕ Adicionar Item Avulso", use_container_width=True):
+            if nome_avulso:
+                st.session_state.orcamento_itens.append({
+                    "codigo": "AVULSO",
+                    "nome": nome_avulso,
+                    "fornecedor": "MANUAL",
+                    "custo_unit": custo_avulso,
+                    "margem": margem_avulso,
+                    "preco_venda": preco_venda_av,
+                    "qtd": qtd_avulso,
+                    "subtotal": subtotal_av
+                })
+                st.success(f"{nome_avulso} adicionado ao orçamento!")
+                st.rerun()
             else:
-                fator = 1.0
-                custo_final_calculado = custo_base_input
-                unidade = st.selectbox("Unidade:", ["UN", "CX", "CART", "AMP", "FR", "PCT"])
-                st.info(f"💡 Custo mantido direto em **R$ {custo_final_calculado:.2f} por {unidade}**")
+                st.warning("Preencha o nome do produto.")
 
-        with col_c3:
-            st.metric("Custo Base de Venda", f"R$ {custo_final_calculado:.2f}", f"Unidade: {unidade}")
-
-        st.write("---")
-        st.write("### 💰 Margem e Quantidade de Venda")
-        col1, col2, col3 = st.columns(3)
+# ABA 2: Orçamento Atual & Geração de PDF
+with tab2:
+    st.subheader("2. Itens no Orçamento Atual")
+    if not st.session_state.orcamento_itens:
+        st.info("Nenhum item adicionado ao orçamento até o momento.")
+    else:
+        df_atual = pd.DataFrame(st.session_state.orcamento_itens)
+        st.dataframe(df_atual[['nome', 'fornecedor', 'qtd', 'custo_unit', 'margem', 'preco_venda', 'subtotal']], use_container_width=True)
         
-        with col1:
-            margem = st.number_input("Margem de Lucro Desejada (%)", min_value=0.0, value=25.0, step=1.0)
-            preco_venda_unit = custo_final_calculado * (1 + margem / 100)
-            st.caption(f"Preço de venda unitário: **R$ {preco_venda_unit:.2f}**")
-            
-        with col2:
-            qtd_venda = st.number_input(f"Quantidade a Vender ({unidade}):", min_value=1.0, value=10.0, step=1.0)
-            
-        with col3:
-            total_item = preco_venda_unit * qtd_venda
-            st.metric("Valor Total deste Item", f"R$ {total_item:.2f}")
-            
-        if st.button("➕ Adicionar ao Orçamento"):
-            nome_item_formatado = f"{nome_final} (CX C/{int(fator)})" if ("Multiplicar" in modo_conversao and fator > 1) else nome_final
-            
-            st.session_state.carrinho.append({
-                "produto": nome_item_formatado,
-                "unidade": unidade,
-                "custo_unit": custo_final_calculado,
-                "margem": margem,
-                "preco_venda_unit": preco_venda_unit,
-                "quantidade": qtd_venda,
-                "total_custo": custo_final_calculado * qtd_venda,
-                "total_item": total_item
-            })
-            st.success(f"'{nome_item_formatado}' adicionado com sucesso ao orçamento!")
-
-# --- ABA 2: ORÇAMENTO COMPLETO ---
-with tab_orcamento:
-    st.subheader("2. Visualização e Exportação do Orçamento")
-    
-    if st.session_state.carrinho:
-        cliente = st.text_input("Nome do Cliente / Farmácia:", placeholder="Ex: Farmácia Santa Luzia - Interior")
+        total_orcamento = df_atual['subtotal'].sum()
+        total_custo = (df_atual['custo_unit'] * df_atual['qtd']).sum()
+        lucro_estimado = total_orcamento - total_custo
         
-        df_carrinho = pd.DataFrame(st.session_state.carrinho)
+        c_tot1, c_tot2, c_tot3 = st.columns(3)
+        c_tot1.metric("Valor Total do Orçamento", f"R$ {total_orcamento:.2f}")
+        c_tot2.metric("Custo Total Estimado", f"R$ {total_custo:.2f}")
+        c_tot3.metric("Lucro Estimado", f"R$ {lucro_estimado:.2f}")
         
-        col_exibir = df_carrinho[["produto", "unidade", "quantidade", "custo_unit", "margem", "preco_venda_unit", "total_item"]].copy()
-        col_exibir.columns = ["Produto", "Unid", "Qtd", "Custo (R$)", "Margem (%)", "Unit. Venda (R$)", "Subtotal (R$)"]
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            nome_cliente = st.text_input("Nome do Cliente / Paciente", value="Cliente")
         
-        st.dataframe(col_exibir.style.format({
-            "Qtd": "{:,.0f}".format,
-            "Custo (R$)": "R$ {:.2f}".format,
-            "Margem (%)": "{:.1f}%".format,
-            "Unit. Venda (R$)": "R$ {:.2f}".format,
-            "Subtotal (R$)": "R$ {:.2f}"
-        }), use_container_width=True)
-        
-        total_venda = df_carrinho['total_item'].sum()
-        total_custo = df_carrinho['total_custo'].sum()
-        lucro_estimado = total_venda - total_custo
-        
-        col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("Total do Pedido", f"R$ {total_venda:.2f}")
-        col_m2.metric("Custo Total", f"R$ {total_custo:.2f}")
-        col_m3.metric("Lucro Estimado", f"R$ {lucro_estimado:.2f}")
-        
-        st.write("---")
-        st.write("**Gerenciar Itens:**")
-        cols_rem = st.columns([3, 1])
-        with cols_rem[0]:
-            idx_remover = st.selectbox(
-                "Selecione um item para remover se necessário:",
-                range(len(st.session_state.carrinho)),
-                format_func=lambda i: f"{st.session_state.carrinho[i]['produto']} ({int(st.session_state.carrinho[i]['quantidade'])} {st.session_state.carrinho[i]['unidade']})"
-            )
-        with cols_rem[1]:
+        with col_btn2:
             st.write("")
             st.write("")
-            if st.button("❌ Remover Item"):
-                st.session_state.carrinho.pop(idx_remover)
-                st.rerun()
-
-        st.write("---")
-        col_act1, col_act2 = st.columns(2)
-        
-        with col_act1:
-            pdf_bytes = gerar_pdf(cliente, st.session_state.carrinho, total_venda)
-            st.download_button(
-                label="📄 Baixar Orçamento em PDF",
-                data=pdf_bytes,
-                file_name=f"Orcamento_{cliente.replace(' ', '_') if cliente else 'Farmacia'}.pdf",
-                mime="application/pdf"
-            )
-            
-        with col_act2:
-            if st.button("🗑️ Limpar Todo o Orçamento"):
-                st.session_state.carrinho = []
+            if st.button("🗑️ Limpar Todo o Orçamento", use_container_width=True):
+                st.session_state.orcamento_itens = []
                 st.rerun()
                 
-        # Texto WhatsApp
-        st.write("**Texto formatado para WhatsApp:**")
-        texto_whats = f"*ORÇAMENTO: {cliente if cliente else 'FARMÁCIA'}*\n\n"
-        for item in st.session_state.carrinho:
-            qtd_txt = f"{int(item['quantidade']):,}".replace(",", ".") if float(item['quantidade']).is_integer() else f"{item['quantidade']:.2f}"
-            texto_whats += f"▪ {item['produto']}\n  Qtd: {qtd_txt} {item['unidade']} | Un: R$ {item['preco_venda_unit']:.2f} | Subtotal: R$ {item['total_item']:.2f}\n"
-        texto_whats += f"\n*TOTAL: R$ {total_venda:.2f}*"
-        
-        st.text_area("Copiar e colar:", texto_whats, height=150)
-    else:
-        st.info("Nenhum item adicionado ao orçamento ainda. Vá na aba 'Inserir Produto no Orçamento'.")
+        # Gerador de PDF
+        def gerar_pdf(itens, cliente, total):
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", 'B', 16)
+            pdf.cell(0, 10, "ORÇAMENTO DE MEDICAMENTOS", ln=True, align="C")
+            pdf.ln(5)
+            
+            pdf.set_font("Arial", '', 11)
+            pdf.cell(0, 7, f"Cliente: {cliente}", ln=True)
+            pdf.cell(0, 7, f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True)
+            pdf.ln(5)
+            
+            pdf.set_font("Arial", 'B', 10)
+            pdf.cell(100, 8, "Descrição", border=1)
+            pdf.cell(25, 8, "Qtd", border=1, align="C")
+            pdf.cell(30, 8, "Unitário (R$)", border=1, align="R")
+            pdf.cell(35, 8, "Total (R$)", border=1, align="R")
+            pdf.ln()
+            
+            pdf.set_font("Arial", '', 10)
+            for item in itens:
+                pdf.cell(100, 8, item['nome'][:40], border=1)
+                pdf.cell(25, 8, str(item['qtd']), border=1, align="C")
+                pdf.cell(30, 8, f"{item['preco_venda']:.2f}", border=1, align="R")
+                pdf.cell(35, 8, f"{item['subtotal']:.2f}", border=1, align="R")
+                pdf.ln()
+                
+            pdf.set_font("Arial", 'B', 11)
+            pdf.cell(155, 10, "TOTAL DO ORÇAMENTO:", border=1, align="R")
+            pdf.cell(35, 10, f"R$ {total:.2f}", border=1, align="R")
+            return bytes(pdf.output())
 
-# --- ABA 3: BANCO DE DADOS COMPLETO ---
-with tab_banco:
-    st.subheader("3. Itens Cadastrados no Banco")
-    df_todos = pd.read_sql_query("""
-        SELECT data_emissao AS "Data", fornecedor AS "Fornecedor", codigo_produto AS "Código", 
-               descricao AS "Produto", valor_unitario AS "Custo Unit. (R$)", quantidade AS "Qtd"
-        FROM compras 
-        ORDER BY id DESC
-    """, conn)
+        pdf_bytes = gerar_pdf(st.session_state.orcamento_itens, nome_cliente, total_orcamento)
+        st.download_button(
+            label="📄 Baixar Orçamento em PDF",
+            data=pdf_bytes,
+            file_name=f"Orcamento_{nome_cliente}_{datetime.now().strftime('%d%m%Y')}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+
+# ABA 3: Histórico e Visualização Geral
+with tab3:
+    st.subheader("3. Histórico e Produtos Cadastrados")
+    conn = get_db_connection()
+    df_view = pd.read_sql_query("SELECT id, codigo, nome, fornecedor, custo_unitario, margem_lucro, preco_venda, data_entrada FROM produtos ORDER BY id DESC", conn)
+    conn.close()
     
-    if not df_todos.empty:
-        st.write(f"Total de registros: **{len(df_todos)}**")
-        st.dataframe(df_todos.style.format({
-            "Qtd": "{:,.0f}".format,
-            "Custo Unit. (R$)": "R$ {:.2f}".format
-        }), use_container_width=True)
+    if not df_view.empty:
+        st.dataframe(df_view, use_container_width=True)
     else:
-        st.info("Nenhum item no banco.")
+        st.info("Nenhum dado cadastrado.")
+
+# ABA 4: ⚙️ AJUSTE DE PREÇOS EM MASSA
+with tab4:
+    st.subheader("⚙️ Reajuste de Margem e Preços em Massa")
+    
+    conn = get_db_connection()
+    df_all = pd.read_sql_query("SELECT * FROM produtos", conn)
+    conn.close()
+    
+    if df_all.empty:
+        st.info("Cadastre ou importe produtos via XML para poder utilizar o reajuste em massa.")
+    else:
+        st.markdown("##### 1. Filtrar Itens para Reajuste")
+        
+        fornecedores_lista = ["TODOS"] + sorted([f for f in df_all['fornecedor'].dropna().unique() if f])
+        
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            sel_fornec = st.selectbox("Filtrar por Fornecedor / Distribuidora:", fornecedores_lista)
+        with col_f2:
+            busca_nome = st.text_input("Filtrar por Palavra-chave no Nome (opcional):").strip().upper()
+            
+        # Aplicação dos Filtros
+        df_filtrado = df_all.copy()
+        if sel_fornec != "TODOS":
+            df_filtrado = df_filtrado[df_filtrado['fornecedor'] == sel_fornec]
+        if busca_nome:
+            df_filtrado = df_filtrado[df_filtrado['nome'].str.contains(busca_nome, na=False)]
+            
+        st.write(f"🔎 **{len(df_filtrado)}** produto(s) selecionado(s) para alteração.")
+        
+        if len(df_filtrado) > 0:
+            st.markdown("---")
+            st.markdown("##### 2. Definir a Regra de Reajuste")
+            
+            tipo_ajuste = st.radio(
+                "Tipo de Alteração:",
+                [
+                    "Definir Nova Margem Fixa (%) para todos", 
+                    "Acréscimo / Redução na Margem Atual (+/- %)",
+                    "Acréscimo Percentual direto no Preço de Venda (+/- %)"
+                ],
+                horizontal=True
+            )
+            
+            col_v1, _ = st.columns([2, 2])
+            with col_v1:
+                if tipo_ajuste == "Definir Nova Margem Fixa (%) para todos":
+                    novo_valor = st.number_input("Nova Margem de Lucro (%):", min_value=0.0, value=35.0, step=1.0)
+                    df_filtrado['nova_margem'] = novo_valor
+                    df_filtrado['novo_preco_venda'] = df_filtrado.apply(
+                        lambda row: round(row['custo_final'] * (1 + novo_valor / 100), 2), axis=1
+                    )
+                elif tipo_ajuste == "Acréscimo / Redução na Margem Atual (+/- %)":
+                    variacao_margem = st.number_input("Variação na Margem (% ex: +5 ou -3):", value=5.0, step=0.5)
+                    df_filtrado['nova_margem'] = df_filtrado['margem_lucro'] + variacao_margem
+                    df_filtrado['novo_preco_venda'] = df_filtrado.apply(
+                        lambda row: round(row['custo_final'] * (1 + row['nova_margem'] / 100), 2), axis=1
+                    )
+                else:
+                    perc_preco = st.number_input("Porcentagem sobre o Preço Atual (% ex: +5 ou -5):", value=5.0, step=0.5)
+                    df_filtrado['novo_preco_venda'] = df_filtrado.apply(
+                        lambda row: round(row['preco_venda'] * (1 + perc_preco / 100), 2), axis=1
+                    )
+                    df_filtrado['nova_margem'] = df_filtrado.apply(
+                        lambda row: round(((row['novo_preco_venda'] - row['custo_final']) / row['custo_final']) * 100, 2) if row['custo_final'] > 0 else row['margem_lucro'], axis=1
+                    )
+
+            st.markdown("##### 3. Pré-visualização das Alterações")
+            colunas_preview = ['nome', 'fornecedor', 'custo_unitario', 'margem_lucro', 'nova_margem', 'preco_venda', 'novo_preco_venda']
+            df_preview = df_filtrado[colunas_preview].rename(columns={
+                'nome': 'Medicamento',
+                'fornecedor': 'Fornecedor',
+                'custo_unitario': 'Custo Base',
+                'margem_lucro': 'Margem Atual (%)',
+                'nova_margem': 'Nova Margem (%)',
+                'preco_venda': 'Preço Venda Atual (R$)',
+                'novo_preco_venda': 'Novo Preço Venda (R$)'
+            })
+            st.dataframe(df_preview, use_container_width=True)
+            
+            st.markdown("---")
+            if st.button("🚀 Confirmar e Aplicar Reajuste em Massa no Banco", type="primary", use_container_width=True):
+                conn = get_db_connection()
+                c = conn.cursor()
+                for _, row in df_filtrado.iterrows():
+                    c.execute('''
+                        UPDATE produtos 
+                        SET margem_lucro = ?, preco_venda = ?
+                        WHERE id = ?
+                    ''', (float(row['nova_margem']), float(row['novo_preco_venda']), int(row['id'])))
+                conn.commit()
+                conn.close()
+                st.success(f"🎉 Reajuste aplicado com sucesso em {len(df_filtrado)} produto(s)!")
+                st.rerun()

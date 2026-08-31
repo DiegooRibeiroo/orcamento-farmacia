@@ -111,7 +111,7 @@ with st.sidebar:
             m_cod = st.text_input("Código")
             m_nome = st.text_input("Nome do Produto").upper()
             m_forn = st.text_input("Fornecedor")
-            m_custo = st.number_input("Custo Unitário (R$)", min_value=0.0, step=0.1, format="%.2f")
+            m_custo = st.number_input("Custo da Caixa/Item (R$)", min_value=0.0, step=0.1, format="%.2f")
             m_margem = st.number_input("Margem de Lucro (%)", value=30.0, step=1.0)
             
             if st.form_submit_button("Salvar no Banco", use_container_width=True):
@@ -195,7 +195,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📊 Histórico de Produtos"
 ])
 
-# ABA 1: Inserir no Orçamento (Com Pesquisa Web Integrada e Histórico de Fornecedores)
+# ABA 1: Inserir no Orçamento
 with tab1:
     st.subheader("1. Inserir Produto no Orçamento")
     origem = st.radio("Origem do Produto:", ["📦 Buscar nas Notas Fiscais (XML)", "✍️ Digitar Item Avulso / Manual"], horizontal=True)
@@ -239,16 +239,30 @@ with tab1:
                             'preco_venda': 'Preço Venda (R$)'
                         }), use_container_width=True)
 
+                # Opção de Venda: Caixa Fechada ou Fracionado por Unidade
+                tipo_venda = st.radio("Forma de Venda:", ["📦 Caixa Fechada", "💊 Fracionado / Por Unidade (Comprimido/Ampola)"], horizontal=True)
+                
+                custo_base_calc = float(item_sel['custo_unitario'])
+                rotulo_desc = item_sel['nome']
+                
+                if tipo_venda == "💊 Fracionado / Por Unidade (Comprimido/Ampola)":
+                    col_u1, _ = st.columns([1, 3])
+                    with col_u1:
+                        qtd_por_caixa = st.number_input("Quantas unidades vêm na caixa?", min_value=1, value=30, step=1)
+                    if qtd_por_caixa > 0:
+                        custo_base_calc = custo_base_calc / qtd_por_caixa
+                        rotulo_desc = f"{item_sel['nome']} (UNIDADE)"
+                
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Custo Base", f"R$ {float(item_sel['custo_unitario']):.2f}")
+                    st.metric("Custo Base Considerado", f"R$ {custo_base_calc:.2f}")
                 with col2:
-                    qtd = st.number_input("Quantidade", min_value=1, value=1, step=1)
+                    qtd = st.number_input("Quantidade a Vender", min_value=1, value=1, step=1)
                 with col3:
                     margem_orc = st.number_input("Margem (%)", value=float(item_sel['margem_lucro']), step=1.0)
                 with col4:
-                    _, preco_sugerido = calcular_custo_e_preco(float(item_sel['custo_unitario']), margem=margem_orc)
-                    preco_venda_orc = st.number_input("Preço Unit. Venda (R$)", value=preco_sugerido, step=0.1, format="%.2f")
+                    _, preco_sugerido = calcular_custo_e_preco(custo_base_calc, margem=margem_orc)
+                    preco_venda_orc = st.number_input("Preço Unit. Venda (R$)", value=preco_sugerido, step=0.01, format="%.2f")
                 
                 subtotal = round(preco_venda_orc * qtd, 2)
                 st.write(f"**Subtotal do Item:** R$ {subtotal:.2f}")
@@ -256,43 +270,52 @@ with tab1:
                 if st.button("➕ Adicionar ao Orçamento", use_container_width=True):
                     st.session_state.orcamento_itens.append({
                         "codigo": item_sel['codigo'],
-                        "nome": item_sel['nome'],
+                        "nome": rotulo_desc,
                         "fornecedor": item_sel['fornecedor'],
-                        "custo_unit": float(item_sel['custo_unitario']),
+                        "custo_unit": round(custo_base_calc, 2),
                         "margem": margem_orc,
                         "preco_venda": preco_venda_orc,
                         "qtd": qtd,
                         "subtotal": subtotal
                     })
-                    st.toast(f"✅ {item_sel['nome']} adicionado ao orçamento!")
+                    st.toast(f"✅ {rotulo_desc} adicionado ao orçamento!")
                     st.rerun()
 
     else:
         col_m1, col_m2 = st.columns(2)
         with col_m1:
             nome_avulso = st.text_input("Nome do Produto / Descrição").upper()
-            qtd_avulso = st.number_input("Quantidade", min_value=1, value=1, step=1, key="qtd_av")
+            tipo_venda_av = st.radio("Forma de Venda (Manual):", ["📦 Caixa Fechada", "💊 Fracionado / Por Unidade"], horizontal=True, key="tp_av")
+            qtd_avulso = st.number_input("Quantidade a Vender", min_value=1, value=1, step=1, key="qtd_av")
         with col_m2:
-            custo_avulso = st.number_input("Custo Unitário (R$)", min_value=0.0, step=0.1, format="%.2f", key="custo_av")
+            custo_avulso_raw = st.number_input("Custo Base (R$)", min_value=0.0, step=0.1, format="%.2f", key="custo_av")
+            if tipo_venda_av == "💊 Fracionado / Por Unidade":
+                qtd_cx_av = st.number_input("Unidades por Caixa:", min_value=1, value=30, step=1, key="qcx_av")
+                custo_avulso = custo_avulso_raw / qtd_cx_av if qtd_cx_av > 0 else custo_avulso_raw
+                nome_avulso_final = f"{nome_avulso} (UNIDADE)" if nome_avulso else ""
+            else:
+                custo_avulso = custo_avulso_raw
+                nome_avulso_final = nome_avulso
+                
             margem_avulso = st.number_input("Margem (%)", value=30.0, step=1.0, key="marg_av")
             
         _, preco_sug_avulso = calcular_custo_e_preco(custo_avulso, margem=margem_avulso)
-        preco_venda_av = st.number_input("Preço Unit. Venda (R$)", value=preco_sug_avulso, step=0.1, format="%.2f", key="pv_av")
+        preco_venda_av = st.number_input("Preço Unit. Venda (R$)", value=preco_sug_avulso, step=0.01, format="%.2f", key="pv_av")
         subtotal_av = round(preco_venda_av * qtd_avulso, 2)
         
         if st.button("➕ Adicionar Item Avulso", use_container_width=True):
-            if nome_avulso:
+            if nome_avulso_final:
                 st.session_state.orcamento_itens.append({
                     "codigo": "AVULSO",
-                    "nome": nome_avulso,
+                    "nome": nome_avulso_final,
                     "fornecedor": "MANUAL",
-                    "custo_unit": custo_avulso,
+                    "custo_unit": round(custo_avulso, 2),
                     "margem": margem_avulso,
                     "preco_venda": preco_venda_av,
                     "qtd": qtd_avulso,
                     "subtotal": subtotal_av
                 })
-                st.toast(f"✅ {nome_avulso} adicionado ao orçamento!")
+                st.toast(f"✅ {nome_avulso_final} adicionado ao orçamento!")
                 st.rerun()
             else:
                 st.warning("Preencha o nome do produto.")

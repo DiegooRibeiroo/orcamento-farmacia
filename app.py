@@ -64,13 +64,17 @@ def salvar_produtos(df_novos):
 if "carrinho" not in st.session_state:
     st.session_state.carrinho = []
 
-# --- INTERFACE PRINCIPAL ---
+if "ultimo_adicionado" not in st.session_state:
+    st.session_state.ultimo_adicionado = None
+
+# --- CABEÇALHO ---
 col_logo, col_logout = st.columns([8, 2])
 with col_logo:
     st.title("💊 Balcão de Orçamentos & Fracionamento")
 with col_logout:
     if st.button("🚪 Sair da Conta"):
         st.session_state.autenticado = False
+        st.session_state.ultimo_adicionado = None
         st.rerun()
 
 # --- BARRA LATERAL ---
@@ -78,6 +82,7 @@ with st.sidebar:
     st.markdown(f"👤 Conectado como: **{USUARIO_CORRETO}**")
     if st.button("🚪 Sair / Desconectar", key="btn_sair_side"):
         st.session_state.autenticado = False
+        st.session_state.ultimo_adicionado = None
         st.rerun()
 
     st.divider()
@@ -144,6 +149,10 @@ tab_orcamento, tab_catalogo = st.tabs(["📋 Novo Orçamento", "📦 Catálogo d
 with tab_orcamento:
     df_prods = carregar_produtos()
     
+    # Exibe a confirmação persistente do último produto adicionado
+    if st.session_state.ultimo_adicionado:
+        st.success(f"✅ **Item adicionado com sucesso:** {st.session_state.ultimo_adicionado}")
+    
     st.subheader("1. Selecionar Medicamento")
     
     col_busca, col_web = st.columns([3, 1])
@@ -206,7 +215,9 @@ with tab_orcamento:
                         "desconto_pct": desconto_item,
                         "subtotal": subtotal
                     })
-                    st.success("Item adicionado!")
+                    
+                    st.session_state.ultimo_adicionado = f"{qtd}x {prod_sel['nome']} ({unidade_desc}) - R$ {subtotal:.2f}"
+                    st.toast(f"✅ Adicionado: {prod_sel['nome']}", icon="🛒")
                     st.rerun()
         else:
             st.warning("Nenhum medicamento encontrado para essa busca.")
@@ -240,6 +251,7 @@ with tab_orcamento:
         with col_c1:
             if st.button("🗑️ Limpar Orçamento", width="stretch"):
                 st.session_state.carrinho = []
+                st.session_state.ultimo_adicionado = None
                 st.rerun()
                 
         with col_c2:

@@ -143,13 +143,53 @@ with st.sidebar:
                 st.success("Medicamento salvo no Supabase!")
                 st.rerun()
 
+    st.divider()
+    with st.expander("🛠️ Manutenção & Backup"):
+        df_backup = carregar_produtos()
+        if not df_backup.empty:
+            csv = df_backup.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Baixar Backup Geral (CSV)",
+                data=csv,
+                file_name=f"backup_farmacia_{datetime.now().strftime('%d%m%Y')}.csv",
+                mime="text/csv",
+                width="stretch"
+            )
+            
+        if st.button("🧹 Remover Produtos Duplicados", width="stretch"):
+            if engine:
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("""
+                            DELETE FROM produtos
+                            WHERE id NOT IN (
+                                SELECT MIN(id)
+                                FROM produtos
+                                GROUP BY nome, apresentacao, laboratorio
+                            );
+                        """))
+                    st.success("Duplicados removidos!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro: {e}")
+                    
+        st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
+        if st.button("🗑️ Apagar TODOS os produtos", type="primary", width="stretch"):
+            if engine:
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("DELETE FROM produtos;"))
+                    st.success("Banco de dados esvaziado!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro: {e}")
+
 # --- ABAS DE ATENDIMENTO ---
 tab_orcamento, tab_catalogo = st.tabs(["📋 Novo Orçamento", "📦 Catálogo de Produtos"])
 
 with tab_orcamento:
     df_prods = carregar_produtos()
     
-    # Exibe a confirmação persistente do último produto adicionado
     if st.session_state.ultimo_adicionado:
         st.success(f"✅ **Item adicionado com sucesso:** {st.session_state.ultimo_adicionado}")
     

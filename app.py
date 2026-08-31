@@ -5,6 +5,7 @@ import xmltodict
 from fpdf import FPDF
 from datetime import datetime
 import urllib.parse
+import json
 import os
 
 # Configuração da Página
@@ -162,13 +163,12 @@ with st.sidebar:
             conn = sqlite3.connect('farmacia.db')
             conn.execute("VACUUM")
             conn.close()
-            st.toast("✅ Banco de dados compactado!")
+            st.toast("✅ Banco de dados compactado com sucesso!")
 
 # ----------------- CLASSE PERSONALIZADA DE PDF -----------------
 class PDFOrcamento(FPDF):
     def header(self):
-        # Barra de topo azul marinho
-        self.set_fill_color(30, 58, 138) # Azul corporativo
+        self.set_fill_color(30, 58, 138)
         self.rect(0, 0, 210, 24, 'F')
         
         self.set_xy(10, 5)
@@ -191,11 +191,11 @@ class PDFOrcamento(FPDF):
 tab1, tab2, tab3, tab4 = st.tabs([
     "🔍 Inserir no Orçamento", 
     "📋 Orçamento Atual & Negociação", 
-    "🌐 Pesquisa na Internet",
+    "📂 Orçamentos Salvos",
     "📊 Histórico de Produtos"
 ])
 
-# ABA 1: Inserir no Orçamento
+# ABA 1: Inserir no Orçamento (Com Pesquisa Web Integrada e Histórico de Fornecedores)
 with tab1:
     st.subheader("1. Inserir Produto no Orçamento")
     origem = st.radio("Origem do Produto:", ["📦 Buscar nas Notas Fiscais (XML)", "✍️ Digitar Item Avulso / Manual"], horizontal=True)
@@ -214,6 +214,31 @@ with tab1:
             if escolha:
                 item_sel = df_prods[df_prods['display'] == escolha].iloc[0]
                 
+                # Atalhos de Pesquisa na Web para o item selecionado
+                termo_encoded = urllib.parse.quote(str(item_sel['nome']))
+                st.markdown(f"**🌐 Consultar Preço de Mercado na Web para:** `{item_sel['nome']}`")
+                c_web1, c_web2, c_web3 = st.columns(3)
+                with c_web1:
+                    st.link_button("🔎 Consulta Remédios", f"https://consultaremedios.com.br/busca?termo={termo_encoded}", use_container_width=True)
+                with c_web2:
+                    st.link_button("🏛️ Tabela CMED / Anvisa", "https://www.gov.br/anvisa/pt-br/assuntos/medicamentos/cmed/precos", use_container_width=True)
+                with c_web3:
+                    st.link_button("🌐 Google Shopping", f"https://www.google.com/search?tbm=shop&q={termo_encoded}", use_container_width=True)
+                
+                st.markdown("---")
+                
+                # Comparativo Histórico de Fornecedores do mesmo medicamento
+                df_mesmo_item = df_prods[df_prods['nome'] == item_sel['nome']]
+                if len(df_mesmo_item) > 1:
+                    with st.expander("📦 Ver histórico de preços deste produto em outros fornecedores"):
+                        st.dataframe(df_mesmo_item[['data_entrada', 'fornecedor', 'custo_unitario', 'margem_lucro', 'preco_venda']].rename(columns={
+                            'data_entrada': 'Data NF',
+                            'fornecedor': 'Fornecedor',
+                            'custo_unitario': 'Custo Base (R$)',
+                            'margem_lucro': 'Margem (%)',
+                            'preco_venda': 'Preço Venda (R$)'
+                        }), use_container_width=True)
+
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Custo Base", f"R$ {float(item_sel['custo_unitario']):.2f}")
@@ -272,13 +297,13 @@ with tab1:
             else:
                 st.warning("Preencha o nome do produto.")
 
-# ABA 2: Orçamento Atual & Negociação em Lote
+# ABA 2: Orçamento Atual, Negociação em Lote e WhatsApp
 with tab2:
     st.subheader("2. Itens no Orçamento Atual")
     if not st.session_state.orcamento_itens:
         st.info("Nenhum item adicionado ao orçamento até o momento.")
     else:
-        # Painel de Desconto em Massa no Orçamento
+        # Ferramenta de Desconto / Reajuste Geral no Orçamento do Cliente
         with st.expander("⚡ Aplicar Desconto ou Reajuste em Massa no Orçamento", expanded=False):
             col_aj1, col_aj2, col_aj3 = st.columns([2, 1, 1])
             with col_aj1:
@@ -306,7 +331,7 @@ with tab2:
                             item['preco_venda'] = round(item['custo_unit'] * (1 + valor_aj_orc / 100), 2)
                         
                         item['subtotal'] = round(item['preco_venda'] * item['qtd'], 2)
-                    st.toast("✅ Valores do orçamento recalculados com sucesso!")
+                    st.toast("✅ Valores recalculados com sucesso!")
                     st.rerun()
 
         st.markdown("##### Lista de Itens do Orçamento:")
@@ -350,6 +375,10 @@ with tab2:
         c_tot3.metric("Lucro Estimado", f"R$ {lucro_estimado:.2f}")
         c_tot4.metric("Margem Média da Venda", f"{margem_geral:.1f}%")
         
+        # Trava de Segurança / Alerta de Margem Baixa
+        if margem_geral < 15.0:
+            st.error(f"⚠️ **Atenção:** A margem de lucro desta venda está em **{margem_geral:.1f}%** (abaixo do piso de segurança recomendado de 15%).")
+
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
             nome_cliente = st.text_input("Nome do Cliente / Paciente", value="Cliente")
@@ -361,13 +390,32 @@ with tab2:
                 st.session_state.orcamento_itens = []
                 st.toast("Orçamento esvaziado!")
                 st.rerun()
-                
+
+        # Botão para Salvar no Histórico
+        if st.button("💾 Salvar Orçamento no Histórico do Sistema", use_container_width=True):
+            conn = get_db_connection()
+            conn.execute('''
+                INSERT INTO orcamentos (cliente, data, total, itens_json)
+                VALUES (?, ?, ?, ?)
+            ''', (nome_cliente, datetime.now().strftime('%d/%m/%Y %H:%M'), total_orcamento, json.dumps(st.session_state.orcamento_itens)))
+            conn.commit()
+            conn.close()
+            st.toast("✅ Orçamento gravado no histórico!")
+
+        # Montagem do Link do WhatsApp
+        msg_itens = "\n".join([f"- {item['qtd']}x {item['nome']}: R$ {item['subtotal']:.2f}" for item in st.session_state.orcamento_itens])
+        texto_whatsapp = f"*ORÇAMENTO DE MEDICAMENTOS*\n\n*Cliente:* {nome_cliente}\n*Data:* {datetime.now().strftime('%d/%m/%Y')}\n\n*Itens:*\n{msg_itens}\n\n*VALOR TOTAL:* R$ {total_orcamento:.2f}\n\n_Validade da proposta: 7 dias._"
+        whatsapp_url = f"https://api.whatsapp.com/send?text={urllib.parse.quote(texto_whatsapp)}"
+
+        col_act1, col_act2 = st.columns(2)
+        with col_act1:
+            st.link_button("📲 Enviar Resumo pelo WhatsApp", whatsapp_url, use_container_width=True)
+
         # Gerador de PDF Profissional
         def gerar_pdf(itens, cliente, total):
             pdf = PDFOrcamento()
             pdf.add_page()
             
-            # Caixa de Informações do Orçamento
             pdf.set_fill_color(245, 247, 250)
             pdf.set_draw_color(210, 215, 225)
             pdf.rect(10, 28, 190, 20, 'FD')
@@ -397,7 +445,6 @@ with tab2:
             
             pdf.ln(10)
             
-            # Cabeçalho da Tabela
             pdf.set_fill_color(30, 58, 138)
             pdf.set_text_color(255, 255, 255)
             pdf.set_draw_color(30, 58, 138)
@@ -409,7 +456,6 @@ with tab2:
             pdf.cell(35, 9, "SUBTOTAL (R$)", border=1, align="R", fill=True)
             pdf.ln()
             
-            # Linhas dos Produtos (Estilo Zebrado)
             pdf.set_font("Arial", '', 9)
             pdf.set_draw_color(230, 230, 230)
             
@@ -426,7 +472,6 @@ with tab2:
                 pdf.ln()
                 fill = not fill
                 
-            # Bloco de Total Final
             pdf.ln(2)
             pdf.set_fill_color(235, 243, 255)
             pdf.set_draw_color(30, 58, 138)
@@ -435,7 +480,6 @@ with tab2:
             pdf.cell(155, 11, "TOTAL GERAL DA PROPOSTA:  ", border=1, align="R", fill=True)
             pdf.cell(35, 11, f"R$ {total:.2f}", border=1, align="R", fill=True)
             
-            # Observação
             pdf.ln(15)
             pdf.set_font("Arial", 'I', 8)
             pdf.set_text_color(100, 100, 100)
@@ -444,66 +488,40 @@ with tab2:
             
             return bytes(pdf.output())
 
-        pdf_bytes = gerar_pdf(st.session_state.orcamento_itens, nome_cliente, total_orcamento)
-        st.download_button(
-            label="📄 Baixar Orçamento em PDF Profissional",
-            data=pdf_bytes,
-            file_name=f"Orcamento_{nome_cliente}_{datetime.now().strftime('%d%m%Y')}.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
+        with col_act2:
+            pdf_bytes = gerar_pdf(st.session_state.orcamento_itens, nome_cliente, total_orcamento)
+            st.download_button(
+                label="📄 Baixar Orçamento em PDF Profissional",
+                data=pdf_bytes,
+                file_name=f"Orcamento_{nome_cliente}_{datetime.now().strftime('%d%m%Y')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
 
-# ABA 3: 🌐 Pesquisa na Internet
+# ABA 3: Orçamentos Salvos no Sistema
 with tab3:
-    st.subheader("🌐 Pesquisa de Medicamentos na Web & Preço de Mercado")
+    st.subheader("📂 Orçamentos Salvos no Sistema")
+    conn = get_db_connection()
+    df_salvos = pd.read_sql_query("SELECT id, cliente, data, total FROM orcamentos ORDER BY id DESC", conn)
+    conn.close()
     
-    termo_busca = st.text_input("Digite o nome do remédio ou princípio ativo:").strip()
-    
-    if termo_busca:
-        termo_encoded = urllib.parse.quote(termo_busca)
+    if df_salvos.empty:
+        st.info("Nenhum orçamento salvo até o momento.")
+    else:
+        st.dataframe(df_salvos, use_container_width=True)
         
-        st.markdown("##### 🔗 Atalhos de Consulta Rápida:")
-        col_link1, col_link2, col_link3 = st.columns(3)
-        with col_link1:
-            st.link_button("🔎 Consulta Remédios", f"https://consultaremedios.com.br/busca?termo={termo_encoded}", use_container_width=True)
-        with col_link2:
-            st.link_button("🏛️ Tabela CMED / Anvisa", f"https://www.gov.br/anvisa/pt-br/assuntos/medicamentos/cmed/precos", use_container_width=True)
-        with col_link3:
-            st.link_button("🌐 Buscar no Google Shopping", f"https://www.google.com/search?tbm=shop&q={termo_encoded}", use_container_width=True)
-            
-        st.markdown("---")
-        st.markdown("##### ⚡ Adicionar ao Orçamento a partir da Pesquisa Web:")
-        with st.form("form_web_orc"):
-            col_w1, col_w2 = st.columns(2)
-            with col_w1:
-                w_nome = st.text_input("Nome do Produto Encontrado", value=termo_busca.upper())
-                w_qtd = st.number_input("Quantidade", min_value=1, value=1, step=1)
-            with col_w2:
-                w_custo = st.number_input("Custo / PMC Encontrado (R$)", min_value=0.0, step=0.1, format="%.2f")
-                w_margem = st.number_input("Margem (%)", value=30.0, step=1.0)
-                
-            _, w_preco_venda = calcular_custo_e_preco(w_custo, margem=w_margem)
-            w_subtotal = round(w_preco_venda * w_qtd, 2)
-            st.write(f"Preço Unitário Calculado: **R$ {w_preco_venda:.2f}** | Subtotal: **R$ {w_subtotal:.2f}**")
-            
-            if st.form_submit_button("➕ Adicionar Direto no Orçamento", use_container_width=True):
-                if w_nome and w_custo > 0:
-                    st.session_state.orcamento_itens.append({
-                        "codigo": "WEB",
-                        "nome": w_nome,
-                        "fornecedor": "PESQUISA WEB",
-                        "custo_unit": w_custo,
-                        "margem": w_margem,
-                        "preco_venda": w_preco_venda,
-                        "qtd": w_qtd,
-                        "subtotal": w_subtotal
-                    })
-                    st.toast(f"✅ {w_nome} adicionado ao orçamento!")
-                    st.rerun()
-                else:
-                    st.warning("Preencha o nome e o custo.")
+        orc_id_reabrir = st.selectbox("Selecione um orçamento anterior para reabrir:", options=df_salvos['id'].tolist(), format_func=lambda x: f"Orçamento #{x} - {df_salvos[df_salvos['id'] == x]['cliente'].values[0]} (R$ {df_salvos[df_salvos['id'] == x]['total'].values[0]:.2f})")
+        
+        if st.button("🔄 Reabrir Itens deste Orçamento na Aba Atual", use_container_width=True):
+            conn = get_db_connection()
+            orc_row = conn.execute("SELECT itens_json FROM orcamentos WHERE id = ?", (orc_id_reabrir,)).fetchone()
+            conn.close()
+            if orc_row:
+                st.session_state.orcamento_itens = json.loads(orc_row['itens_json'])
+                st.toast("✅ Orçamento carregado na aba Orçamento Atual!")
+                st.rerun()
 
-# ABA 4: Histórico Geral
+# ABA 4: Histórico Geral de Produtos
 with tab4:
     st.subheader("4. Histórico de Medicamentos Cadastrados")
     conn = get_db_connection()

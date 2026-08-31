@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import xmltodict
-import datetime
+from datetime import datetime
 import urllib.parse
-from fpdf import FPDF
 from sqlalchemy import create_engine, text
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
@@ -24,7 +23,7 @@ def verificar_login():
             with st.form("login_form"):
                 usuario = st.text_input("Usuário")
                 senha = st.text_input("Senha", type="password")
-                entrar = st.form_submit_button("Entrar no Sistema", use_container_width=True)
+                entrar = st.form_submit_button("Entrar no Sistema", width="stretch")
                 
                 if entrar:
                     if usuario == USUARIO_CORRETO and senha == SENHA_CORRETA:
@@ -39,7 +38,7 @@ def verificar_login():
 if not verificar_login():
     st.stop()
 
-# --- CONEXÃO COM BANCO DE DADOS (SUPABASE / POSTGRESQL) ---
+# --- CONEXÃO COM BANCO DE DADOS (SUPABASE) ---
 @st.cache_resource
 def get_engine():
     if "DATABASE_URL" in st.secrets:
@@ -49,28 +48,7 @@ def get_engine():
 
 engine = get_engine()
 
-def init_db():
-    if engine:
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS produtos (
-                        id SERIAL PRIMARY KEY,
-                        nome TEXT,
-                        apresentacao TEXT,
-                        laboratorio TEXT,
-                        unidades_caixa INTEGER,
-                        preco_caixa NUMERIC,
-                        preco_unitario NUMERIC
-                    );
-                """))
-                conn.commit()
-        except Exception as e:
-            st.error(f"Erro ao conectar no banco: {e}")
-
-init_db()
-
-# --- FUNÇÕES DE PERSISTÊNCIA ---
+# --- FUNÇÕES DE BANCO ---
 def carregar_produtos():
     if engine:
         try:
@@ -86,7 +64,7 @@ def salvar_produtos(df_novos):
 if "carrinho" not in st.session_state:
     st.session_state.carrinho = []
 
-# --- CABEÇALHO ---
+# --- INTERFACE PRINCIPAL ---
 col_logo, col_logout = st.columns([8, 2])
 with col_logo:
     st.title("💊 Balcão de Orçamentos & Fracionamento")
@@ -95,7 +73,7 @@ with col_logout:
         st.session_state.autenticado = False
         st.rerun()
 
-# --- BARRA LATERAL (IMPORTAÇÃO E CADASTROS) ---
+# --- BARRA LATERAL ---
 with st.sidebar:
     st.markdown(f"👤 Conectado como: **{USUARIO_CORRETO}**")
     if st.button("🚪 Sair / Desconectar", key="btn_sair_side"):
@@ -104,37 +82,39 @@ with st.sidebar:
 
     st.divider()
     st.subheader("📥 Importação de Notas (XML)")
-    xml_file = st.file_uploader("Suba os arquivos XML da NF-e", type=["xml"])
+    xml_files = st.file_uploader("Suba os arquivos XML da NF-e", type=["xml"], accept_multiple_files=True)
     
-    if xml_file and st.button("Processar Arquivo para o Supabase", use_container_width=True):
-        try:
-            doc = xmltodict.parse(xml_file.read())
-            nfe = doc.get("nfeProc", doc).get("NFe", {}).get("infNFe", {})
-            detalhes = nfe.get("det", [])
-            if isinstance(detalhes, dict):
-                detalhes = [detalhes]
+    if xml_files and st.button("Processar Arquivos para o Supabase", width="stretch"):
+        produtos_importados = []
+        for xml_file in xml_files:
+            try:
+                doc = xmltodict.parse(xml_file.read())
+                nfe = doc.get("nfeProc", doc).get("NFe", {}).get("infNFe", {})
+                detalhes = nfe.get("det", [])
+                if isinstance(detalhes, dict):
+                    detalhes = [detalhes]
+                    
+                for item in detalhes:
+                    prod = item.get("prod", {})
+                    nome = prod.get("xProd", "Não identificado")
+                    v_un = float(prod.get("vUnCom", 0.0))
+                    
+                    produtos_importados.append({
+                        "nome": nome,
+                        "apresentacao": prod.get("uCom", "CX"),
+                        "laboratorio": "Distribuidora",
+                        "unidades_caixa": 1,
+                        "preco_caixa": v_un,
+                        "preco_unitario": v_un
+                    })
+            except Exception as e:
+                st.error(f"Erro no arquivo {xml_file.name}: {e}")
                 
-            produtos_importados = []
-            for item in detalhes:
-                prod = item.get("prod", {})
-                nome = prod.get("xProd", "Não identificado")
-                v_un = float(prod.get("vUnCom", 0.0))
-                
-                produtos_importados.append({
-                    "nome": nome,
-                    "apresentacao": prod.get("uCom", "CX"),
-                    "laboratorio": "Distribuidora",
-                    "unidades_caixa": 1,
-                    "preco_caixa": v_un,
-                    "preco_unitario": v_un
-                })
-                
+        if produtos_importados:
             df_novos = pd.DataFrame(produtos_importados)
             salvar_produtos(df_novos)
-            st.success(f"{len(df_novos)} produtos salvos com sucesso no Supabase!")
+            st.success(f"✅ {len(df_novos)} itens gravados com sucesso no Supabase!")
             st.rerun()
-        except Exception as e:
-            st.error(f"Erro ao processar XML: {e}")
 
     st.divider()
     with st.expander("✍️ Cadastrar Preço Manual no Banco"):
@@ -155,10 +135,10 @@ with st.sidebar:
                     "preco_unitario": m_preco_cx / m_un
                 }])
                 salvar_produtos(df_manual)
-                st.success("Medicamento salvo com sucesso!")
+                st.success("Medicamento salvo no Supabase!")
                 st.rerun()
 
-# --- TELA PRINCIPAL (ORÇAMENTO) ---
+# --- ABAS DE ATENDIMENTO ---
 tab_orcamento, tab_catalogo = st.tabs(["📋 Novo Orçamento", "📦 Catálogo de Produtos"])
 
 with tab_orcamento:
@@ -207,7 +187,7 @@ with tab_orcamento:
             with c_btn:
                 st.write("")
                 st.write("")
-                if st.button("➕ Adicionar ao Orçamento", use_container_width=True):
+                if st.button("➕ Adicionar ao Orçamento", width="stretch"):
                     if tipo_venda == "Caixa Fechada":
                         v_unit = float(prod_sel["preco_caixa"])
                         unidade_desc = "cx"
@@ -251,14 +231,14 @@ with tab_orcamento:
                 "nome": "Produto", "tipo": "Tipo", "qtd": "Qtd",
                 "unitario": "Valor Unit.", "desconto_pct": "Desc %", "subtotal": "Subtotal (R$)"
             }),
-            use_container_width=True
+            width="stretch"
         )
         
         st.markdown(f"### Total Final: **R$ {total_liquido:.2f}**")
         
         col_c1, col_c2, col_c3 = st.columns([2, 2, 2])
         with col_c1:
-            if st.button("🗑️ Limpar Orçamento", use_container_width=True):
+            if st.button("🗑️ Limpar Orçamento", width="stretch"):
                 st.session_state.carrinho = []
                 st.rerun()
                 
@@ -281,6 +261,6 @@ with tab_catalogo:
     st.subheader("📦 Catálogo Geral de Produtos (Supabase)")
     df_todos = carregar_produtos()
     if not df_todos.empty:
-        st.dataframe(df_todos, use_container_width=True)
+        st.dataframe(df_todos, width="stretch")
     else:
         st.info("Nenhum produto cadastrado até o momento.")

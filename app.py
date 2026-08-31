@@ -5,6 +5,7 @@ import xmltodict
 from fpdf import FPDF
 from datetime import datetime
 import urllib.parse
+import os
 
 # Configuração da Página
 st.set_page_config(page_title="Gestão & Orçamentos - Farmácia", layout="wide", page_icon="💊")
@@ -61,7 +62,7 @@ if 'orcamento_itens' not in st.session_state:
 
 st.title("💊 Sistema de Gestão de Custos e Orçamentos")
 
-# ----------------- SIDEBAR: IMPORTAÇÃO E CADASTRO -----------------
+# ----------------- SIDEBAR: IMPORTAÇÃO, CADASTRO E MANUTENÇÃO -----------------
 with st.sidebar:
     st.header("📥 Importação de Notas (XML)")
     uploaded_files = st.file_uploader("Suba os arquivos XML da NF-e", type=["xml"], accept_multiple_files=True)
@@ -126,6 +127,65 @@ with st.sidebar:
                     st.rerun()
                 else:
                     st.warning("Preencha o nome e o custo.")
+
+    st.markdown("---")
+    with st.expander("🛠️ Manutenção & Backup"):
+        if os.path.exists('farmacia.db'):
+            with open('farmacia.db', 'rb') as f:
+                db_bytes = f.read()
+            st.download_button(
+                label="💾 Fazer Backup do Banco (Download)",
+                data=db_bytes,
+                file_name=f"backup_farmacia_{datetime.now().strftime('%d%m%Y_%H%M')}.db",
+                mime="application/x-sqlite3",
+                use_container_width=True
+            )
+        
+        if st.button("🧹 Limpar Produtos Duplicados", use_container_width=True):
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute('''
+                DELETE FROM produtos
+                WHERE id NOT IN (
+                    SELECT MAX(id)
+                    FROM produtos
+                    GROUP BY nome
+                )
+            ''')
+            removidos = c.rowcount
+            conn.commit()
+            conn.close()
+            st.toast(f"✅ {removidos} registros duplicados removidos!")
+            st.rerun()
+            
+        if st.button("⚡ Otimizar Espaço (Compactar)", use_container_width=True):
+            conn = sqlite3.connect('farmacia.db')
+            conn.execute("VACUUM")
+            conn.close()
+            st.toast("✅ Banco de dados compactado!")
+
+# ----------------- CLASSE PERSONALIZADA DE PDF -----------------
+class PDFOrcamento(FPDF):
+    def header(self):
+        # Barra de topo azul marinho
+        self.set_fill_color(30, 58, 138) # Azul corporativo
+        self.rect(0, 0, 210, 24, 'F')
+        
+        self.set_xy(10, 5)
+        self.set_font('Arial', 'B', 14)
+        self.set_text_color(255, 255, 255)
+        self.cell(0, 7, 'GESTAO FARMACEUTICA & PROPOSTA COMERCIAL', 0, 1, 'L')
+        
+        self.set_font('Arial', '', 9)
+        self.set_text_color(200, 220, 255)
+        self.cell(0, 5, 'Sistema de Gestao de Custos e Orcamentos de Medicamentos', 0, 1, 'L')
+        self.ln(10)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.set_text_color(128, 128, 128)
+        self.cell(0, 10, f'Pagina {self.page_no()} | Documento gerado em {datetime.now().strftime("%d/%m/%Y %H:%M")}', 0, 0, 'C')
 
 # ----------------- ABAS PRINCIPAIS -----------------
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -218,7 +278,7 @@ with tab2:
     if not st.session_state.orcamento_itens:
         st.info("Nenhum item adicionado ao orçamento até o momento.")
     else:
-        # Ferramenta de Desconto / Reajuste Geral no Orçamento do Cliente
+        # Painel de Desconto em Massa no Orçamento
         with st.expander("⚡ Aplicar Desconto ou Reajuste em Massa no Orçamento", expanded=False):
             col_aj1, col_aj2, col_aj3 = st.columns([2, 1, 1])
             with col_aj1:
@@ -302,42 +362,91 @@ with tab2:
                 st.toast("Orçamento esvaziado!")
                 st.rerun()
                 
-        # Gerador de PDF
+        # Gerador de PDF Profissional
         def gerar_pdf(itens, cliente, total):
-            pdf = FPDF()
+            pdf = PDFOrcamento()
             pdf.add_page()
-            pdf.set_font("Arial", 'B', 16)
-            pdf.cell(0, 10, "ORÇAMENTO DE MEDICAMENTOS", ln=True, align="C")
-            pdf.ln(5)
             
-            pdf.set_font("Arial", '', 11)
-            pdf.cell(0, 7, f"Cliente: {cliente}", ln=True)
-            pdf.cell(0, 7, f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True)
-            pdf.ln(5)
+            # Caixa de Informações do Orçamento
+            pdf.set_fill_color(245, 247, 250)
+            pdf.set_draw_color(210, 215, 225)
+            pdf.rect(10, 28, 190, 20, 'FD')
+            
+            pdf.set_xy(14, 30)
+            pdf.set_font("Arial", 'B', 10)
+            pdf.set_text_color(50, 50, 50)
+            pdf.cell(30, 6, "CLIENTE:", 0, 0)
+            pdf.set_font("Arial", '', 10)
+            pdf.cell(80, 6, str(cliente).upper(), 0, 0)
             
             pdf.set_font("Arial", 'B', 10)
-            pdf.cell(100, 8, "Descrição", border=1)
-            pdf.cell(25, 8, "Qtd", border=1, align="C")
-            pdf.cell(30, 8, "Unitário (R$)", border=1, align="R")
-            pdf.cell(35, 8, "Total (R$)", border=1, align="R")
+            pdf.cell(30, 6, "DATA:", 0, 0)
+            pdf.set_font("Arial", '', 10)
+            pdf.cell(40, 6, datetime.now().strftime('%d/%m/%Y %H:%M'), 0, 1)
+            
+            pdf.set_xy(14, 38)
+            pdf.set_font("Arial", 'B', 10)
+            pdf.cell(30, 6, "STATUS:", 0, 0)
+            pdf.set_font("Arial", '', 10)
+            pdf.cell(80, 6, "Proposta Comercial / Em Aberto", 0, 0)
+            
+            pdf.set_font("Arial", 'B', 10)
+            pdf.cell(30, 6, "VALIDADE:", 0, 0)
+            pdf.set_font("Arial", '', 10)
+            pdf.cell(40, 6, "7 dias", 0, 1)
+            
+            pdf.ln(10)
+            
+            # Cabeçalho da Tabela
+            pdf.set_fill_color(30, 58, 138)
+            pdf.set_text_color(255, 255, 255)
+            pdf.set_draw_color(30, 58, 138)
+            pdf.set_font("Arial", 'B', 9)
+            
+            pdf.cell(105, 9, "  DESCRICAO DO ITEM / MEDICAMENTO", border=1, fill=True)
+            pdf.cell(20, 9, "QTD", border=1, align="C", fill=True)
+            pdf.cell(30, 9, "UNITARIO (R$)", border=1, align="R", fill=True)
+            pdf.cell(35, 9, "SUBTOTAL (R$)", border=1, align="R", fill=True)
             pdf.ln()
             
-            pdf.set_font("Arial", '', 10)
+            # Linhas dos Produtos (Estilo Zebrado)
+            pdf.set_font("Arial", '', 9)
+            pdf.set_draw_color(230, 230, 230)
+            
+            fill = False
             for item in itens:
-                pdf.cell(100, 8, str(item['nome'])[:40], border=1)
-                pdf.cell(25, 8, str(item['qtd']), border=1, align="C")
-                pdf.cell(30, 8, f"{float(item['preco_venda']):.2f}", border=1, align="R")
-                pdf.cell(35, 8, f"{float(item['subtotal']):.2f}", border=1, align="R")
-                pdf.ln()
+                pdf.set_fill_color(248, 249, 250) if fill else pdf.set_fill_color(255, 255, 255)
+                pdf.set_text_color(40, 40, 40)
                 
+                nome_formatado = "  " + str(item['nome'])[:45]
+                pdf.cell(105, 8, nome_formatado, border='LRB', fill=True)
+                pdf.cell(20, 8, str(item['qtd']), border='LRB', align="C", fill=True)
+                pdf.cell(30, 8, f"{float(item['preco_venda']):.2f}", border='LRB', align="R", fill=True)
+                pdf.cell(35, 8, f"{float(item['subtotal']):.2f}", border='LRB', align="R", fill=True)
+                pdf.ln()
+                fill = not fill
+                
+            # Bloco de Total Final
+            pdf.ln(2)
+            pdf.set_fill_color(235, 243, 255)
+            pdf.set_draw_color(30, 58, 138)
+            pdf.set_text_color(30, 58, 138)
             pdf.set_font("Arial", 'B', 11)
-            pdf.cell(155, 10, "TOTAL DO ORÇAMENTO:", border=1, align="R")
-            pdf.cell(35, 10, f"R$ {total:.2f}", border=1, align="R")
+            pdf.cell(155, 11, "TOTAL GERAL DA PROPOSTA:  ", border=1, align="R", fill=True)
+            pdf.cell(35, 11, f"R$ {total:.2f}", border=1, align="R", fill=True)
+            
+            # Observação
+            pdf.ln(15)
+            pdf.set_font("Arial", 'I', 8)
+            pdf.set_text_color(100, 100, 100)
+            pdf.cell(0, 4, "* Precos e condicoes comerciais sujeitos a alteracao conforme disponibilidade de estoque.", 0, 1)
+            pdf.cell(0, 4, "* Este documento e apenas uma cotacao/orcamento, nao possuindo valor fiscal.", 0, 1)
+            
             return bytes(pdf.output())
 
         pdf_bytes = gerar_pdf(st.session_state.orcamento_itens, nome_cliente, total_orcamento)
         st.download_button(
-            label="📄 Baixar Orçamento em PDF",
+            label="📄 Baixar Orçamento em PDF Profissional",
             data=pdf_bytes,
             file_name=f"Orcamento_{nome_cliente}_{datetime.now().strftime('%d%m%Y')}.pdf",
             mime="application/pdf",

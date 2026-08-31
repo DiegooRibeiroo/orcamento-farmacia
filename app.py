@@ -4,7 +4,8 @@ import pandas as pd
 import xmltodict
 from fpdf import FPDF
 from datetime import datetime
-import io
+import urllib.parse
+import requests
 
 # Configuração da Página
 st.set_page_config(page_title="Gestão & Orçamentos - Farmácia", layout="wide", page_icon="💊")
@@ -128,10 +129,12 @@ with st.sidebar:
                     st.warning("Preencha o nome e o custo.")
 
 # ----------------- ABAS PRINCIPAIS -----------------
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔍 Inserir no Orçamento", 
     "📋 Orçamento Atual & Negociação", 
-    "📊 Histórico de Produtos"
+    "🌐 Pesquisa na Internet",
+    "⚙️ Reajuste em Massa no Banco",
+    "📊 Histórico Geral"
 ])
 
 # ABA 1: Inserir no Orçamento
@@ -343,9 +346,151 @@ with tab2:
             use_container_width=True
         )
 
-# ABA 3: Histórico e Visualização Geral
+# ABA 3: 🌐 Pesquisa na Internet & Tabela CMED
 with tab3:
-    st.subheader("3. Histórico e Produtos Cadastrados")
+    st.subheader("🌐 Pesquisa de Medicamentos na Web & Preço de Mercado")
+    
+    termo_busca = st.text_input("Digite o nome do remédio ou princípio ativo:").strip()
+    
+    if termo_busca:
+        termo_encoded = urllib.parse.quote(termo_busca)
+        
+        st.markdown("##### 🔗 Atalhos de Consulta Rápida:")
+        col_link1, col_link2, col_link3 = st.columns(3)
+        with col_link1:
+            st.link_button("🔎 Consulta Remédios", f"https://consultaremedios.com.br/busca?termo={termo_encoded}", use_container_width=True)
+        with col_link2:
+            st.link_button("🏛️ Tabela CMED / Anvisa", f"https://www.gov.br/anvisa/pt-br/assuntos/medicamentos/cmed/precos", use_container_width=True)
+        with col_link3:
+            st.link_button("🌐 Buscar no Google Shopping", f"https://www.google.com/search?tbm=shop&q={termo_encoded}", use_container_width=True)
+            
+        st.markdown("---")
+        st.markdown("##### ⚡ Adicionar ao Orçamento a partir da Pesquisa Web:")
+        with st.form("form_web_orc"):
+            col_w1, col_w2 = st.columns(2)
+            with col_w1:
+                w_nome = st.text_input("Nome do Produto Encontrado", value=termo_busca.upper())
+                w_qtd = st.number_input("Quantidade", min_value=1, value=1, step=1)
+            with col_w2:
+                w_custo = st.number_input("Custo / PMC Encontrado (R$)", min_value=0.0, step=0.1, format="%.2f")
+                w_margem = st.number_input("Margem (%)", value=30.0, step=1.0)
+                
+            _, w_preco_venda = calcular_custo_e_preco(w_custo, margem=w_margem)
+            w_subtotal = round(w_preco_venda * w_qtd, 2)
+            st.write(f"Preço Unitário Calculado: **R$ {w_preco_venda:.2f}** | Subtotal: **R$ {w_subtotal:.2f}**")
+            
+            if st.form_submit_button("➕ Adicionar Direto no Orçamento", use_container_width=True):
+                if w_nome and w_custo > 0:
+                    st.session_state.orcamento_itens.append({
+                        "codigo": "WEB",
+                        "nome": w_nome,
+                        "fornecedor": "PESQUISA WEB",
+                        "custo_unit": w_custo,
+                        "margem": w_margem,
+                        "preco_venda": w_preco_venda,
+                        "qtd": w_qtd,
+                        "subtotal": w_subtotal
+                    })
+                    st.toast(f"✅ {w_nome} adicionado ao orçamento!")
+                    st.rerun()
+                else:
+                    st.warning("Preencha o nome e o custo.")
+
+# ABA 4: ⚙️ Reajuste em Massa no Banco de Dados
+with tab4:
+    st.subheader("⚙️ Reajuste de Margem e Preços em Massa (Banco Geral)")
+    
+    conn = get_db_connection()
+    df_all = pd.read_sql_query("SELECT * FROM produtos", conn)
+    conn.close()
+    
+    if df_all.empty:
+        st.info("Cadastre ou importe produtos via XML para poder utilizar o reajuste em massa.")
+    else:
+        st.markdown("##### 1. Filtrar Itens para Reajuste")
+        fornecedores_lista = ["TODOS"] + sorted([f for f in df_all['fornecedor'].dropna().unique() if f])
+        
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            sel_fornec = st.selectbox("Filtrar por Fornecedor / Distribuidora:", fornecedores_lista)
+        with col_f2:
+            busca_nome = st.text_input("Filtrar por Palavra-chave no Nome (opcional):").strip().upper()
+            
+        df_filtrado = df_all.copy()
+        if sel_fornec != "TODOS":
+            df_filtrado = df_filtrado[df_filtrado['fornecedor'] == sel_fornec]
+        if busca_nome:
+            df_filtrado = df_filtrado[df_filtrado['nome'].str.contains(busca_nome, na=False)]
+            
+        st.write(f"🔎 **{len(df_filtrado)}** produto(s) selecionado(s) para alteração.")
+        
+        if len(df_filtrado) > 0:
+            st.markdown("---")
+            st.markdown("##### 2. Definir a Regra de Reajuste")
+            tipo_ajuste = st.radio(
+                "Tipo de Alteração:",
+                [
+                    "Definir Nova Margem Fixa (%) para todos", 
+                    "Acréscimo / Redução na Margem Atual (+/- %)",
+                    "Acréscimo Percentual direto no Preço de Venda (+/- %)"
+                ],
+                horizontal=True
+            )
+            
+            col_v1, _ = st.columns([2, 2])
+            with col_v1:
+                if tipo_ajuste == "Definir Nova Margem Fixa (%) para todos":
+                    novo_valor = st.number_input("Nova Margem de Lucro (%):", min_value=0.0, value=35.0, step=1.0)
+                    df_filtrado['nova_margem'] = novo_valor
+                    df_filtrado['novo_preco_venda'] = df_filtrado.apply(
+                        lambda row: round(row['custo_final'] * (1 + novo_valor / 100), 2), axis=1
+                    )
+                elif tipo_ajuste == "Acréscimo / Redução na Margem Atual (+/- %)":
+                    variacao_margem = st.number_input("Variação na Margem (% ex: +5 ou -3):", value=5.0, step=0.5)
+                    df_filtrado['nova_margem'] = df_filtrado['margem_lucro'] + variacao_margem
+                    df_filtrado['novo_preco_venda'] = df_filtrado.apply(
+                        lambda row: round(row['custo_final'] * (1 + row['nova_margem'] / 100), 2), axis=1
+                    )
+                else:
+                    perc_preco = st.number_input("Porcentagem sobre o Preço Atual (% ex: +5 ou -5):", value=5.0, step=0.5)
+                    df_filtrado['novo_preco_venda'] = df_filtrado.apply(
+                        lambda row: round(row['preco_venda'] * (1 + perc_preco / 100), 2), axis=1
+                    )
+                    df_filtrado['nova_margem'] = df_filtrado.apply(
+                        lambda row: round(((row['novo_preco_venda'] - row['custo_final']) / row['custo_final']) * 100, 2) if row['custo_final'] > 0 else row['margem_lucro'], axis=1
+                    )
+
+            st.markdown("##### 3. Pré-visualização das Alterações")
+            colunas_preview = ['nome', 'fornecedor', 'custo_unitario', 'margem_lucro', 'nova_margem', 'preco_venda', 'novo_preco_venda']
+            df_preview = df_filtrado[colunas_preview].rename(columns={
+                'nome': 'Medicamento',
+                'fornecedor': 'Fornecedor',
+                'custo_unitario': 'Custo Base',
+                'margem_lucro': 'Margem Atual (%)',
+                'nova_margem': 'Nova Margem (%)',
+                'preco_venda': 'Preço Venda Atual (R$)',
+                'novo_preco_venda': 'Novo Preço Venda (R$)'
+            })
+            st.dataframe(df_preview, use_container_width=True)
+            
+            st.markdown("---")
+            if st.button("🚀 Confirmar e Aplicar Reajuste em Massa no Banco", type="primary", use_container_width=True):
+                conn = get_db_connection()
+                c = conn.cursor()
+                for _, row in df_filtrado.iterrows():
+                    c.execute('''
+                        UPDATE produtos 
+                        SET margem_lucro = ?, preco_venda = ?
+                        WHERE id = ?
+                    ''', (float(row['nova_margem']), float(row['novo_preco_venda']), int(row['id'])))
+                conn.commit()
+                conn.close()
+                st.toast(f"🎉 Reajuste aplicado em {len(df_filtrado)} produto(s)!")
+                st.rerun()
+
+# ABA 5: Histórico Geral
+with tab5:
+    st.subheader("5. Histórico e Produtos Cadastrados")
     conn = get_db_connection()
     df_view = pd.read_sql_query("SELECT id, codigo, nome, fornecedor, custo_unitario, margem_lucro, preco_venda, data_entrada FROM produtos ORDER BY id DESC", conn)
     conn.close()

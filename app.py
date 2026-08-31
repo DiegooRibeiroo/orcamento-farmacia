@@ -51,28 +51,22 @@ engine = get_engine()
 
 def init_db():
     if engine:
-        with engine.connect() as conn:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS produtos (
-                    id SERIAL PRIMARY KEY,
-                    nome TEXT,
-                    apresentacao TEXT,
-                    laboratorio TEXT,
-                    unidades_caixa INTEGER,
-                    preco_caixa NUMERIC,
-                    preco_unitario NUMERIC
-                );
-            """))
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS orcamentos (
-                    id SERIAL PRIMARY KEY,
-                    data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    cliente TEXT,
-                    total NUMERIC,
-                    itens_json TEXT
-                );
-            """))
-            conn.commit()
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS produtos (
+                        id SERIAL PRIMARY KEY,
+                        nome TEXT,
+                        apresentacao TEXT,
+                        laboratorio TEXT,
+                        unidades_caixa INTEGER,
+                        preco_caixa NUMERIC,
+                        preco_unitario NUMERIC
+                    );
+                """))
+                conn.commit()
+        except Exception as e:
+            st.error(f"Erro ao conectar no banco: {e}")
 
 init_db()
 
@@ -80,7 +74,7 @@ init_db()
 def carregar_produtos():
     if engine:
         try:
-            return pd.read_sql("SELECT * FROM produtos", engine)
+            return pd.read_sql("SELECT * FROM produtos ORDER BY nome ASC", engine)
         except Exception:
             pass
     return pd.DataFrame(columns=["id", "nome", "apresentacao", "laboratorio", "unidades_caixa", "preco_caixa", "preco_unitario"])
@@ -89,11 +83,10 @@ def salvar_produtos(df_novos):
     if engine and not df_novos.empty:
         df_novos.to_sql("produtos", engine, if_exists="append", index=False)
 
-# Inicializar carrinho na sessão
 if "carrinho" not in st.session_state:
     st.session_state.carrinho = []
 
-# --- MENU SUPERIOR ---
+# --- CABEÇALHO ---
 col_logo, col_logout = st.columns([8, 2])
 with col_logo:
     st.title("💊 Balcão de Orçamentos & Fracionamento")
@@ -102,11 +95,72 @@ with col_logout:
         st.session_state.autenticado = False
         st.rerun()
 
-tab_orcamento, tab_xml, tab_catalogo = st.tabs(["📋 Novo Orçamento", "📥 Importar XML de NF-e", "📦 Catálogo de Produtos"])
+# --- BARRA LATERAL (IMPORTAÇÃO E CADASTROS) ---
+with st.sidebar:
+    st.markdown(f"👤 Conectado como: **{USUARIO_CORRETO}**")
+    if st.button("🚪 Sair / Desconectar", key="btn_sair_side"):
+        st.session_state.autenticado = False
+        st.rerun()
 
-# ==========================================
-# ABA 1: NOVO ORÇAMENTO
-# ==========================================
+    st.divider()
+    st.subheader("📥 Importação de Notas (XML)")
+    xml_file = st.file_uploader("Suba os arquivos XML da NF-e", type=["xml"])
+    
+    if xml_file and st.button("Processar Arquivo para o Supabase", use_container_width=True):
+        try:
+            doc = xmltodict.parse(xml_file.read())
+            nfe = doc.get("nfeProc", doc).get("NFe", {}).get("infNFe", {})
+            detalhes = nfe.get("det", [])
+            if isinstance(detalhes, dict):
+                detalhes = [detalhes]
+                
+            produtos_importados = []
+            for item in detalhes:
+                prod = item.get("prod", {})
+                nome = prod.get("xProd", "Não identificado")
+                v_un = float(prod.get("vUnCom", 0.0))
+                
+                produtos_importados.append({
+                    "nome": nome,
+                    "apresentacao": prod.get("uCom", "CX"),
+                    "laboratorio": "Distribuidora",
+                    "unidades_caixa": 1,
+                    "preco_caixa": v_un,
+                    "preco_unitario": v_un
+                })
+                
+            df_novos = pd.DataFrame(produtos_importados)
+            salvar_produtos(df_novos)
+            st.success(f"{len(df_novos)} produtos salvos com sucesso no Supabase!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erro ao processar XML: {e}")
+
+    st.divider()
+    with st.expander("✍️ Cadastrar Preço Manual no Banco"):
+        with st.form("form_manual"):
+            m_nome = st.text_input("Nome do Produto")
+            m_apres = st.text_input("Apresentação (Ex: CX 30 comp)", value="CX")
+            m_lab = st.text_input("Laboratório", value="Genérico")
+            m_un = st.number_input("Unidades por Caixa", min_value=1, value=1)
+            m_preco_cx = st.number_input("Preço da Caixa (R$)", min_value=0.01, value=10.0, step=0.5)
+            
+            if st.form_submit_button("Salvar Medicamento"):
+                df_manual = pd.DataFrame([{
+                    "nome": m_nome,
+                    "apresentacao": m_apres,
+                    "laboratorio": m_lab,
+                    "unidades_caixa": m_un,
+                    "preco_caixa": m_preco_cx,
+                    "preco_unitario": m_preco_cx / m_un
+                }])
+                salvar_produtos(df_manual)
+                st.success("Medicamento salvo com sucesso!")
+                st.rerun()
+
+# --- TELA PRINCIPAL (ORÇAMENTO) ---
+tab_orcamento, tab_catalogo = st.tabs(["📋 Novo Orçamento", "📦 Catálogo de Produtos"])
+
 with tab_orcamento:
     df_prods = carregar_produtos()
     
@@ -114,10 +168,10 @@ with tab_orcamento:
     
     col_busca, col_web = st.columns([3, 1])
     with col_busca:
-        busca = st.text_input("🔍 Buscar no catálogo interno:", placeholder="Digite o nome do remédio...")
+        busca = st.text_input("🔍 Buscar no catálogo:", placeholder="Digite o nome do remédio...")
     
     with col_web:
-        termo_web = st.text_input("🌐 Pesquisa Externa (Google):", placeholder="Ex: amoxicilina 500mg bula")
+        termo_web = st.text_input("🌐 Pesquisa Externa (Google):", placeholder="Ex: amoxicilina bula")
         if termo_web:
             link_pesquisa = f"https://www.google.com/search?q={urllib.parse.quote(termo_web)}"
             st.markdown(f"[🔗 Abrir pesquisa para **'{termo_web}'**]({link_pesquisa})", unsafe_allow_html=True)
@@ -177,16 +231,14 @@ with tab_orcamento:
         else:
             st.warning("Nenhum medicamento encontrado para essa busca.")
     else:
-        st.info("O catálogo está vazio. Importe uma NF-e (XML) na aba ao lado.")
+        st.info("O catálogo do banco de dados está vazio. Importe uma NF-e (XML) na barra lateral esquerda.")
 
-    # --- LISTA DO ORÇAMENTO ATUAL ---
     if st.session_state.carrinho:
         st.divider()
         st.subheader("🛒 Itens do Orçamento")
         
         df_carrinho = pd.DataFrame(st.session_state.carrinho)
         
-        # Negociação em lote
         col_neg1, col_neg2 = st.columns([2, 4])
         with col_neg1:
             desc_geral = st.number_input("Aplicar Desconto Global (%):", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
@@ -225,54 +277,8 @@ with tab_orcamento:
                 link_zap = f"https://wa.me/{tel_cliente}?text={urllib.parse.quote(msg)}"
                 st.markdown(f"<a href='{link_zap}' target='_blank' style='display:inline-block;padding:10px 20px;background-color:#25D366;color:white;text-decoration:none;border-radius:6px;font-weight:bold;text-align:center;width:100%;'>📲 Enviar no WhatsApp</a>", unsafe_allow_html=True)
 
-# ==========================================
-# ABA 2: IMPORTAR XML
-# ==========================================
-with tab_xml:
-    st.subheader("📥 Importação de NF-e (XML)")
-    st.write("Suba o arquivo XML fornecido pela distribuidora para cadastrar os produtos automaticamente.")
-    
-    xml_file = st.file_uploader("Selecione o arquivo .xml da NF-e", type=["xml"])
-    
-    if xml_file:
-        try:
-            doc = xmltodict.parse(xml_file.read())
-            nfe = doc.get("nfeProc", doc).get("NFe", {}).get("infNFe", {})
-            detalhes = nfe.get("det", [])
-            if isinstance(detalhes, dict):
-                detalhes = [detalhes]
-                
-            produtos_importados = []
-            for item in detalhes:
-                prod = item.get("prod", {})
-                nome = prod.get("xProd", "Não identificado")
-                v_un = float(prod.get("vUnCom", 0.0))
-                
-                produtos_importados.append({
-                    "nome": nome,
-                    "apresentacao": prod.get("uCom", "CX"),
-                    "laboratorio": "Distribuidora",
-                    "unidades_caixa": 1,
-                    "preco_caixa": v_un,
-                    "preco_unitario": v_un
-                })
-                
-            df_novos = pd.DataFrame(produtos_importados)
-            st.dataframe(df_novos, use_container_width=True)
-            
-            if st.button("💾 Gravar Produtos no Banco de Dados", use_container_width=True):
-                salvar_produtos(df_novos)
-                st.success("Medicamentos cadastrados com sucesso no Supabase!")
-                st.rerun()
-                
-        except Exception as e:
-            st.error(f"Erro ao processar o XML: {e}")
-
-# ==========================================
-# ABA 3: CATÁLOGO
-# ==========================================
 with tab_catalogo:
-    st.subheader("📦 Catálogo Geral de Produtos")
+    st.subheader("📦 Catálogo Geral de Produtos (Supabase)")
     df_todos = carregar_produtos()
     if not df_todos.empty:
         st.dataframe(df_todos, use_container_width=True)

@@ -5,7 +5,6 @@ import xmltodict
 from fpdf import FPDF
 from datetime import datetime
 import urllib.parse
-import requests
 
 # Configuração da Página
 st.set_page_config(page_title="Gestão & Orçamentos - Farmácia", layout="wide", page_icon="💊")
@@ -129,12 +128,11 @@ with st.sidebar:
                     st.warning("Preencha o nome e o custo.")
 
 # ----------------- ABAS PRINCIPAIS -----------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "🔍 Inserir no Orçamento", 
     "📋 Orçamento Atual & Negociação", 
     "🌐 Pesquisa na Internet",
-    "⚙️ Reajuste em Massa no Banco",
-    "📊 Histórico Geral"
+    "📊 Histórico de Produtos"
 ])
 
 # ABA 1: Inserir no Orçamento
@@ -220,8 +218,8 @@ with tab2:
     if not st.session_state.orcamento_itens:
         st.info("Nenhum item adicionado ao orçamento até o momento.")
     else:
-        # Painel de Ajuste em Massa no Orçamento Aberto
-        with st.expander("⚡ Aplicar Desconto ou Reajuste em Massa neste Orçamento", expanded=False):
+        # Ferramenta de Desconto / Reajuste Geral no Orçamento do Cliente
+        with st.expander("⚡ Aplicar Desconto ou Reajuste em Massa no Orçamento", expanded=False):
             col_aj1, col_aj2, col_aj3 = st.columns([2, 1, 1])
             with col_aj1:
                 tipo_aj_orc = st.selectbox(
@@ -248,12 +246,12 @@ with tab2:
                             item['preco_venda'] = round(item['custo_unit'] * (1 + valor_aj_orc / 100), 2)
                         
                         item['subtotal'] = round(item['preco_venda'] * item['qtd'], 2)
-                    st.toast("✅ Valores recalculados com sucesso!")
+                    st.toast("✅ Valores do orçamento recalculados com sucesso!")
                     st.rerun()
 
-        st.markdown("##### Lista de Itens Adicionados:")
+        st.markdown("##### Lista de Itens do Orçamento:")
         
-        # Cabeçalho da Lista com Botão de Excluir Individual
+        # Tabela com botão de exclusão individual (🗑️)
         c_h1, c_h2, c_h3, c_h4, c_h5, c_h6 = st.columns([4, 1, 2, 2, 2, 1])
         c_h1.write("**Descrição**")
         c_h2.write("**Qtd**")
@@ -280,7 +278,7 @@ with tab2:
 
         st.markdown("---")
 
-        # Métricas de Resumo
+        # Resumo Financeiro
         total_orcamento = sum(item['subtotal'] for item in st.session_state.orcamento_itens)
         total_custo = sum(item['custo_unit'] * item['qtd'] for item in st.session_state.orcamento_itens)
         lucro_estimado = total_orcamento - total_custo
@@ -346,7 +344,7 @@ with tab2:
             use_container_width=True
         )
 
-# ABA 3: 🌐 Pesquisa na Internet & Tabela CMED
+# ABA 3: 🌐 Pesquisa na Internet
 with tab3:
     st.subheader("🌐 Pesquisa de Medicamentos na Web & Preço de Mercado")
     
@@ -396,101 +394,9 @@ with tab3:
                 else:
                     st.warning("Preencha o nome e o custo.")
 
-# ABA 4: ⚙️ Reajuste em Massa no Banco de Dados
+# ABA 4: Histórico Geral
 with tab4:
-    st.subheader("⚙️ Reajuste de Margem e Preços em Massa (Banco Geral)")
-    
-    conn = get_db_connection()
-    df_all = pd.read_sql_query("SELECT * FROM produtos", conn)
-    conn.close()
-    
-    if df_all.empty:
-        st.info("Cadastre ou importe produtos via XML para poder utilizar o reajuste em massa.")
-    else:
-        st.markdown("##### 1. Filtrar Itens para Reajuste")
-        fornecedores_lista = ["TODOS"] + sorted([f for f in df_all['fornecedor'].dropna().unique() if f])
-        
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            sel_fornec = st.selectbox("Filtrar por Fornecedor / Distribuidora:", fornecedores_lista)
-        with col_f2:
-            busca_nome = st.text_input("Filtrar por Palavra-chave no Nome (opcional):").strip().upper()
-            
-        df_filtrado = df_all.copy()
-        if sel_fornec != "TODOS":
-            df_filtrado = df_filtrado[df_filtrado['fornecedor'] == sel_fornec]
-        if busca_nome:
-            df_filtrado = df_filtrado[df_filtrado['nome'].str.contains(busca_nome, na=False)]
-            
-        st.write(f"🔎 **{len(df_filtrado)}** produto(s) selecionado(s) para alteração.")
-        
-        if len(df_filtrado) > 0:
-            st.markdown("---")
-            st.markdown("##### 2. Definir a Regra de Reajuste")
-            tipo_ajuste = st.radio(
-                "Tipo de Alteração:",
-                [
-                    "Definir Nova Margem Fixa (%) para todos", 
-                    "Acréscimo / Redução na Margem Atual (+/- %)",
-                    "Acréscimo Percentual direto no Preço de Venda (+/- %)"
-                ],
-                horizontal=True
-            )
-            
-            col_v1, _ = st.columns([2, 2])
-            with col_v1:
-                if tipo_ajuste == "Definir Nova Margem Fixa (%) para todos":
-                    novo_valor = st.number_input("Nova Margem de Lucro (%):", min_value=0.0, value=35.0, step=1.0)
-                    df_filtrado['nova_margem'] = novo_valor
-                    df_filtrado['novo_preco_venda'] = df_filtrado.apply(
-                        lambda row: round(row['custo_final'] * (1 + novo_valor / 100), 2), axis=1
-                    )
-                elif tipo_ajuste == "Acréscimo / Redução na Margem Atual (+/- %)":
-                    variacao_margem = st.number_input("Variação na Margem (% ex: +5 ou -3):", value=5.0, step=0.5)
-                    df_filtrado['nova_margem'] = df_filtrado['margem_lucro'] + variacao_margem
-                    df_filtrado['novo_preco_venda'] = df_filtrado.apply(
-                        lambda row: round(row['custo_final'] * (1 + row['nova_margem'] / 100), 2), axis=1
-                    )
-                else:
-                    perc_preco = st.number_input("Porcentagem sobre o Preço Atual (% ex: +5 ou -5):", value=5.0, step=0.5)
-                    df_filtrado['novo_preco_venda'] = df_filtrado.apply(
-                        lambda row: round(row['preco_venda'] * (1 + perc_preco / 100), 2), axis=1
-                    )
-                    df_filtrado['nova_margem'] = df_filtrado.apply(
-                        lambda row: round(((row['novo_preco_venda'] - row['custo_final']) / row['custo_final']) * 100, 2) if row['custo_final'] > 0 else row['margem_lucro'], axis=1
-                    )
-
-            st.markdown("##### 3. Pré-visualização das Alterações")
-            colunas_preview = ['nome', 'fornecedor', 'custo_unitario', 'margem_lucro', 'nova_margem', 'preco_venda', 'novo_preco_venda']
-            df_preview = df_filtrado[colunas_preview].rename(columns={
-                'nome': 'Medicamento',
-                'fornecedor': 'Fornecedor',
-                'custo_unitario': 'Custo Base',
-                'margem_lucro': 'Margem Atual (%)',
-                'nova_margem': 'Nova Margem (%)',
-                'preco_venda': 'Preço Venda Atual (R$)',
-                'novo_preco_venda': 'Novo Preço Venda (R$)'
-            })
-            st.dataframe(df_preview, use_container_width=True)
-            
-            st.markdown("---")
-            if st.button("🚀 Confirmar e Aplicar Reajuste em Massa no Banco", type="primary", use_container_width=True):
-                conn = get_db_connection()
-                c = conn.cursor()
-                for _, row in df_filtrado.iterrows():
-                    c.execute('''
-                        UPDATE produtos 
-                        SET margem_lucro = ?, preco_venda = ?
-                        WHERE id = ?
-                    ''', (float(row['nova_margem']), float(row['novo_preco_venda']), int(row['id'])))
-                conn.commit()
-                conn.close()
-                st.toast(f"🎉 Reajuste aplicado em {len(df_filtrado)} produto(s)!")
-                st.rerun()
-
-# ABA 5: Histórico Geral
-with tab5:
-    st.subheader("5. Histórico e Produtos Cadastrados")
+    st.subheader("4. Histórico de Medicamentos Cadastrados")
     conn = get_db_connection()
     df_view = pd.read_sql_query("SELECT id, codigo, nome, fornecedor, custo_unitario, margem_lucro, preco_venda, data_entrada FROM produtos ORDER BY id DESC", conn)
     conn.close()

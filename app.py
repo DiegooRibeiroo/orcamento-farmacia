@@ -100,7 +100,7 @@ with st.sidebar:
                 
         conn.commit()
         conn.close()
-        st.success(f"{total_importados} produtos importados com sucesso!")
+        st.toast(f"✅ {total_importados} produtos importados com sucesso!")
         st.rerun()
 
     st.markdown("---")
@@ -122,7 +122,7 @@ with st.sidebar:
                     ''', (m_cod, m_nome, m_forn, round(m_custo, 2), c_fin, m_margem, p_vend, str(datetime.now().date())))
                     conn.commit()
                     conn.close()
-                    st.success("Item cadastrado com sucesso!")
+                    st.toast("✅ Item cadastrado com sucesso!")
                     st.rerun()
                 else:
                     st.warning("Preencha o nome e o custo.")
@@ -178,7 +178,7 @@ with tab1:
                         "qtd": qtd,
                         "subtotal": subtotal
                     })
-                    st.success(f"{item_sel['nome']} adicionado ao orçamento!")
+                    st.toast(f"✅ {item_sel['nome']} adicionado ao orçamento!")
                     st.rerun()
 
     else:
@@ -206,7 +206,7 @@ with tab1:
                     "qtd": qtd_avulso,
                     "subtotal": subtotal_av
                 })
-                st.success(f"{nome_avulso} adicionado ao orçamento!")
+                st.toast(f"✅ {nome_avulso} adicionado ao orçamento!")
                 st.rerun()
             else:
                 st.warning("Preencha o nome do produto.")
@@ -217,16 +217,6 @@ with tab2:
     if not st.session_state.orcamento_itens:
         st.info("Nenhum item adicionado ao orçamento até o momento.")
     else:
-        df_atual = pd.DataFrame(st.session_state.orcamento_itens)
-        
-        df_display = df_atual.copy()
-        df_display['custo_unit'] = df_display['custo_unit'].apply(lambda x: f"R$ {x:.2f}")
-        df_display['margem'] = df_display['margem'].apply(lambda x: f"{x:.1f}%")
-        df_display['preco_venda'] = df_display['preco_venda'].apply(lambda x: f"R$ {x:.2f}")
-        df_display['subtotal'] = df_display['subtotal'].apply(lambda x: f"R$ {x:.2f}")
-        
-        st.dataframe(df_display[['nome', 'fornecedor', 'qtd', 'custo_unit', 'margem', 'preco_venda', 'subtotal']], use_container_width=True)
-        
         # Painel de Ajuste em Massa no Orçamento Aberto
         with st.expander("⚡ Aplicar Desconto ou Reajuste em Massa neste Orçamento", expanded=False):
             col_aj1, col_aj2, col_aj3 = st.columns([2, 1, 1])
@@ -255,8 +245,37 @@ with tab2:
                             item['preco_venda'] = round(item['custo_unit'] * (1 + valor_aj_orc / 100), 2)
                         
                         item['subtotal'] = round(item['preco_venda'] * item['qtd'], 2)
-                    st.success("Valores do orçamento atualizados!")
+                    st.toast("✅ Valores recalculados com sucesso!")
                     st.rerun()
+
+        st.markdown("##### Lista de Itens Adicionados:")
+        
+        # Cabeçalho da Lista com Botão de Excluir Individual
+        c_h1, c_h2, c_h3, c_h4, c_h5, c_h6 = st.columns([4, 1, 2, 2, 2, 1])
+        c_h1.write("**Descrição**")
+        c_h2.write("**Qtd**")
+        c_h3.write("**Custo Unit.**")
+        c_h4.write("**Preço Venda**")
+        c_h5.write("**Subtotal**")
+        c_h6.write("**Remover**")
+
+        idx_remover = None
+        for i, item in enumerate(st.session_state.orcamento_itens):
+            col_l1, col_l2, col_l3, col_l4, col_l5, col_l6 = st.columns([4, 1, 2, 2, 2, 1])
+            col_l1.write(f"**{item['nome']}**")
+            col_l2.write(str(item['qtd']))
+            col_l3.write(f"R$ {item['custo_unit']:.2f}")
+            col_l4.write(f"R$ {item['preco_venda']:.2f} ({item['margem']:.0f}%)")
+            col_l5.write(f"**R$ {item['subtotal']:.2f}**")
+            if col_l6.button("🗑️", key=f"del_{i}", help="Remover apenas este item"):
+                idx_remover = i
+
+        if idx_remover is not None:
+            removido = st.session_state.orcamento_itens.pop(idx_remover)
+            st.toast(f"🗑️ {removido['nome']} removido!")
+            st.rerun()
+
+        st.markdown("---")
 
         # Métricas de Resumo
         total_orcamento = sum(item['subtotal'] for item in st.session_state.orcamento_itens)
@@ -279,6 +298,7 @@ with tab2:
             st.write("")
             if st.button("🗑️ Limpar Todo o Orçamento", use_container_width=True):
                 st.session_state.orcamento_itens = []
+                st.toast("Orçamento esvaziado!")
                 st.rerun()
                 
         # Gerador de PDF

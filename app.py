@@ -43,12 +43,18 @@ if not verificar_login():
 def get_engine():
     if "DATABASE_URL" in st.secrets:
         db_url = st.secrets["DATABASE_URL"]
-        return create_engine(db_url, pool_pre_ping=True)
+        return create_engine(
+            db_url,
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10
+        )
     return None
 
 engine = get_engine()
 
-# --- FUNÇÕES DE BANCO ---
+# --- FUNÇÕES DE BANCO COM CACHE RÁPIDO (TTL: 10 minutos) ---
+@st.cache_data(ttl=600)
 def carregar_produtos():
     if engine:
         try:
@@ -60,12 +66,16 @@ def carregar_produtos():
 def salvar_produtos(df_novos):
     if engine and not df_novos.empty:
         df_novos.to_sql("produtos", engine, if_exists="append", index=False)
+        st.cache_data.clear()  # Limpa o cache para carregar as novidades na hora
 
 if "carrinho" not in st.session_state:
     st.session_state.carrinho = []
 
 if "ultimo_adicionado" not in st.session_state:
     st.session_state.ultimo_adicionado = None
+
+# Carrega os produtos uma única vez por ciclo
+df_prods = carregar_produtos()
 
 # --- CABEÇALHO ---
 col_logo, col_logout = st.columns([8, 2])
@@ -118,7 +128,7 @@ with st.sidebar:
         if produtos_importados:
             df_novos = pd.DataFrame(produtos_importados)
             salvar_produtos(df_novos)
-            st.success(f"✅ {len(df_novos)} itens gravados com sucesso no Supabase!")
+            st.success(f"✅ {len(df_novos)} itens gravados com sucesso!")
             st.rerun()
 
     st.divider()
@@ -140,14 +150,13 @@ with st.sidebar:
                     "preco_unitario": m_preco_cx / m_un
                 }])
                 salvar_produtos(df_manual)
-                st.success("Medicamento salvo no Supabase!")
+                st.success("Medicamento salvo com sucesso!")
                 st.rerun()
 
     st.divider()
     with st.expander("🛠️ Manutenção & Backup"):
-        df_backup = carregar_produtos()
-        if not df_backup.empty:
-            csv = df_backup.to_csv(index=False).encode('utf-8')
+        if not df_prods.empty:
+            csv = df_prods.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Baixar Backup Geral (CSV)",
                 data=csv,
@@ -156,6 +165,10 @@ with st.sidebar:
                 width="stretch"
             )
             
+        if st.button("🔄 Atualizar Cache da Memória", width="stretch"):
+            st.cache_data.clear()
+            st.rerun()
+
         if st.button("🧹 Remover Produtos Duplicados", width="stretch"):
             if engine:
                 try:
@@ -168,6 +181,7 @@ with st.sidebar:
                                 GROUP BY nome, apresentacao, laboratorio
                             );
                         """))
+                    st.cache_data.clear()
                     st.success("Duplicados removidos!")
                     st.rerun()
                 except Exception as e:
@@ -179,6 +193,7 @@ with st.sidebar:
                 try:
                     with engine.begin() as conn:
                         conn.execute(text("DELETE FROM produtos;"))
+                    st.cache_data.clear()
                     st.success("Banco de dados esvaziado!")
                     st.rerun()
                 except Exception as e:
@@ -188,10 +203,8 @@ with st.sidebar:
 tab_orcamento, tab_catalogo = st.tabs(["📋 Novo Orçamento", "📦 Catálogo de Produtos"])
 
 with tab_orcamento:
-    df_prods = carregar_produtos()
-    
     if st.session_state.ultimo_adicionado:
-        st.success(f"✅ **Item adicionado com sucesso:** {st.session_state.ultimo_adicionado}")
+        st.success(f"✅ **Item adicionado:** {st.session_state.ultimo_adicionado}")
     
     st.subheader("1. Selecionar Medicamento")
     
@@ -311,8 +324,7 @@ with tab_orcamento:
 
 with tab_catalogo:
     st.subheader("📦 Catálogo Geral de Produtos (Supabase)")
-    df_todos = carregar_produtos()
-    if not df_todos.empty:
-        st.dataframe(df_todos, width="stretch")
+    if not df_prods.empty:
+        st.dataframe(df_prods, width="stretch")
     else:
         st.info("Nenhum produto cadastrado até o momento.")

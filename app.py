@@ -57,9 +57,12 @@ def calcular_custo_e_preco(custo_unit, icms=0, ipi=0, pis_cofins=0, margem=30):
     preco_venda = round(custo_final * (1 + margem / 100), 2)
     return custo_final, preco_venda
 
-# Sessão para Orçamento Atual
+# Sessão para Orçamento Atual e Nome do Cliente
 if 'orcamento_itens' not in st.session_state:
     st.session_state.orcamento_itens = []
+
+if 'nome_cliente' not in st.session_state:
+    st.session_state.nome_cliente = ""
 
 st.title("💊 Sistema de Gestão de Custos e Orçamentos")
 
@@ -326,6 +329,14 @@ with tab2:
     if not st.session_state.orcamento_itens:
         st.info("Nenhum item adicionado ao orçamento até o momento.")
     else:
+        # Campo do Nome do Cliente integrado ao estado
+        st.session_state.nome_cliente = st.text_input(
+            "👤 Nome do Cliente / Paciente:", 
+            value=st.session_state.nome_cliente, 
+            placeholder="Digite o nome completo do cliente..."
+        )
+        nome_cliente_final = st.session_state.nome_cliente.strip() if st.session_state.nome_cliente.strip() else "CLIENTE"
+
         # Ferramenta de Desconto / Reajuste Geral no Orçamento do Cliente
         with st.expander("⚡ Aplicar Desconto ou Reajuste em Massa no Orçamento", expanded=False):
             col_aj1, col_aj2, col_aj3 = st.columns([2, 1, 1])
@@ -404,30 +415,26 @@ with tab2:
 
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
-            nome_cliente = st.text_input("Nome do Cliente / Paciente", value="Cliente")
+            if st.button("💾 Salvar Orçamento no Histórico do Sistema", use_container_width=True):
+                conn = get_db_connection()
+                conn.execute('''
+                    INSERT INTO orcamentos (cliente, data, total, itens_json)
+                    VALUES (?, ?, ?, ?)
+                ''', (nome_cliente_final, datetime.now().strftime('%d/%m/%Y %H:%M'), total_orcamento, json.dumps(st.session_state.orcamento_itens)))
+                conn.commit()
+                conn.close()
+                st.toast("✅ Orçamento gravado no histórico!")
         
         with col_btn2:
-            st.write("")
-            st.write("")
             if st.button("🗑️ Limpar Todo o Orçamento", use_container_width=True):
                 st.session_state.orcamento_itens = []
+                st.session_state.nome_cliente = ""
                 st.toast("Orçamento esvaziado!")
                 st.rerun()
 
-        # Botão para Salvar no Histórico
-        if st.button("💾 Salvar Orçamento no Histórico do Sistema", use_container_width=True):
-            conn = get_db_connection()
-            conn.execute('''
-                INSERT INTO orcamentos (cliente, data, total, itens_json)
-                VALUES (?, ?, ?, ?)
-            ''', (nome_cliente, datetime.now().strftime('%d/%m/%Y %H:%M'), total_orcamento, json.dumps(st.session_state.orcamento_itens)))
-            conn.commit()
-            conn.close()
-            st.toast("✅ Orçamento gravado no histórico!")
-
         # Montagem do Link do WhatsApp
         msg_itens = "\n".join([f"- {item['qtd']}x {item['nome']}: R$ {item['subtotal']:.2f}" for item in st.session_state.orcamento_itens])
-        texto_whatsapp = f"*ORÇAMENTO DE MEDICAMENTOS*\n\n*Cliente:* {nome_cliente}\n*Data:* {datetime.now().strftime('%d/%m/%Y')}\n\n*Itens:*\n{msg_itens}\n\n*VALOR TOTAL:* R$ {total_orcamento:.2f}\n\n_Validade da proposta: 7 dias._"
+        texto_whatsapp = f"*ORÇAMENTO DE MEDICAMENTOS*\n\n*Cliente:* {nome_cliente_final}\n*Data:* {datetime.now().strftime('%d/%m/%Y')}\n\n*Itens:*\n{msg_itens}\n\n*VALOR TOTAL:* R$ {total_orcamento:.2f}\n\n_Validade da proposta: 7 dias._"
         whatsapp_url = f"https://api.whatsapp.com/send?text={urllib.parse.quote(texto_whatsapp)}"
 
         col_act1, col_act2 = st.columns(2)
@@ -512,11 +519,11 @@ with tab2:
             return bytes(pdf.output())
 
         with col_act2:
-            pdf_bytes = gerar_pdf(st.session_state.orcamento_itens, nome_cliente, total_orcamento)
+            pdf_bytes = gerar_pdf(st.session_state.orcamento_itens, nome_cliente_final, total_orcamento)
             st.download_button(
                 label="📄 Baixar Orçamento em PDF Profissional",
                 data=pdf_bytes,
-                file_name=f"Orcamento_{nome_cliente}_{datetime.now().strftime('%d%m%Y')}.pdf",
+                file_name=f"Orcamento_{nome_cliente_final.replace(' ', '_')}_{datetime.now().strftime('%d%m%Y')}.pdf",
                 mime="application/pdf",
                 use_container_width=True
             )
@@ -537,10 +544,11 @@ with tab3:
         
         if st.button("🔄 Reabrir Itens deste Orçamento na Aba Atual", use_container_width=True):
             conn = get_db_connection()
-            orc_row = conn.execute("SELECT itens_json FROM orcamentos WHERE id = ?", (orc_id_reabrir,)).fetchone()
+            orc_row = conn.execute("SELECT cliente, itens_json FROM orcamentos WHERE id = ?", (orc_id_reabrir,)).fetchone()
             conn.close()
             if orc_row:
                 st.session_state.orcamento_itens = json.loads(orc_row['itens_json'])
+                st.session_state.nome_cliente = orc_row['cliente']
                 st.toast("✅ Orçamento carregado na aba Orçamento Atual!")
                 st.rerun()
 

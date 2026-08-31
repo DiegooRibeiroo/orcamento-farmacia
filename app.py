@@ -11,7 +11,32 @@ import os
 # Configuração da Página
 st.set_page_config(page_title="Gestão & Orçamentos - Farmácia", layout="wide", page_icon="💊")
 
-# Conexão com o Banco SQLite
+# ----------------- CONTROLE DE ACESSO (LOGIN SIMPLES) -----------------
+USUARIO_CORRETO = "admin"
+SENHA_CORRETA = "farmacia123"
+
+if "logado" not in st.session_state:
+    st.session_state.logado = False
+
+if not st.session_state.logado:
+    st.markdown("<h2 style='text-align: center;'>🔐 Acesso ao Sistema de Farmácia</h2>", unsafe_allow_html=True)
+    col_l1, col_l2, col_l3 = st.columns([1, 1, 1])
+    with col_l2:
+        with st.form("form_login"):
+            usuario_input = st.text_input("Usuário")
+            senha_input = st.text_input("Senha", type="password")
+            btn_entrar = st.form_submit_button("Entrar no Sistema", use_container_width=True)
+            
+            if btn_entrar:
+                if usuario_input == USUARIO_CORRETO and senha_input == SENHA_CORRETA:
+                    st.session_state.logado = True
+                    st.toast("✅ Bem-vindo ao sistema!")
+                    st.rerun()
+                else:
+                    st.error("❌ Usuário ou senha incorretos.")
+    st.stop()
+
+# ----------------- BANCO DE DADOS & PERFORMANCE -----------------
 def get_db_connection():
     conn = sqlite3.connect('farmacia.db', check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -37,6 +62,10 @@ def init_db():
             data_entrada TEXT
         )
     ''')
+    # Índices para alta velocidade de busca
+    c.execute('CREATE INDEX IF NOT EXISTS idx_produtos_nome ON produtos(nome)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_produtos_fornec ON produtos(fornecedor)')
+    
     c.execute('''
         CREATE TABLE IF NOT EXISTS orcamentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,23 +80,33 @@ def init_db():
 
 init_db()
 
-# Funções Auxiliares de Cálculo
+# Cache de dados em memória para acelerar a renderização
+@st.cache_data(show_spinner=False)
+def carregar_produtos_cache():
+    conn = get_db_connection()
+    df = pd.read_sql_query("SELECT * FROM produtos ORDER BY id DESC", conn)
+    conn.close()
+    return df
+
 def calcular_custo_e_preco(custo_unit, icms=0, ipi=0, pis_cofins=0, margem=30):
     custo_final = round(custo_unit * (1 + (icms + ipi + pis_cofins) / 100), 2)
     preco_venda = round(custo_final * (1 + margem / 100), 2)
     return custo_final, preco_venda
 
-# Sessão para Orçamento Atual e Nome do Cliente
+# Sessão do Orçamento
 if 'orcamento_itens' not in st.session_state:
     st.session_state.orcamento_itens = []
 
-if 'nome_cliente' not in st.session_state:
-    st.session_state.nome_cliente = ""
-
 st.title("💊 Sistema de Gestão de Custos e Orçamentos")
 
-# ----------------- SIDEBAR: IMPORTAÇÃO, CADASTRO E MANUTENÇÃO -----------------
+# ----------------- SIDEBAR -----------------
 with st.sidebar:
+    st.write(f"👤 Conectado como: **{USUARIO_CORRETO}**")
+    if st.button("🚪 Sair / Desconectar", use_container_width=True):
+        st.session_state.logado = False
+        st.rerun()
+
+    st.markdown("---")
     st.header("📥 Importação de Notas (XML)")
     uploaded_files = st.file_uploader("Suba os arquivos XML da NF-e", type=["xml"], accept_multiple_files=True)
     
@@ -105,6 +144,7 @@ with st.sidebar:
                 
         conn.commit()
         conn.close()
+        carregar_produtos_cache.clear() # Limpa o cache após novas importações
         st.toast(f"✅ {total_importados} produtos importados com sucesso!")
         st.rerun()
 
@@ -127,6 +167,7 @@ with st.sidebar:
                     ''', (m_cod, m_nome, m_forn, round(m_custo, 2), c_fin, m_margem, p_vend, str(datetime.now().date())))
                     conn.commit()
                     conn.close()
+                    carregar_produtos_cache.clear()
                     st.toast("✅ Item cadastrado com sucesso!")
                     st.rerun()
                 else:
@@ -138,7 +179,7 @@ with st.sidebar:
             with open('farmacia.db', 'rb') as f:
                 db_bytes = f.read()
             st.download_button(
-                label="💾 Fazer Backup do Banco (Download)",
+                label="💾 Fazer Backup do Banco",
                 data=db_bytes,
                 file_name=f"backup_farmacia_{datetime.now().strftime('%d%m%Y_%H%M')}.db",
                 mime="application/x-sqlite3",
@@ -159,14 +200,15 @@ with st.sidebar:
             removidos = c.rowcount
             conn.commit()
             conn.close()
+            carregar_produtos_cache.clear()
             st.toast(f"✅ {removidos} registros duplicados removidos!")
             st.rerun()
             
-        if st.button("⚡ Otimizar Espaço (Compactar)", use_container_width=True):
+        if st.button("⚡ Compactar Banco (VACUUM)", use_container_width=True):
             conn = sqlite3.connect('farmacia.db')
             conn.execute("VACUUM")
             conn.close()
-            st.toast("✅ Banco de dados compactado com sucesso!")
+            st.toast("✅ Banco de dados otimizado!")
 
 # ----------------- CLASSE PERSONALIZADA DE PDF -----------------
 class PDFOrcamento(FPDF):
@@ -203,9 +245,7 @@ with tab1:
     st.subheader("1. Inserir Produto no Orçamento")
     origem = st.radio("Origem do Produto:", ["📦 Buscar nas Notas Fiscais (XML)", "✍️ Digitar Item Avulso / Manual"], horizontal=True)
     
-    conn = get_db_connection()
-    df_prods = pd.read_sql_query("SELECT * FROM produtos ORDER BY id DESC", conn)
-    conn.close()
+    df_prods = carregar_produtos_cache()
     
     if origem == "📦 Buscar nas Notas Fiscais (XML)":
         if df_prods.empty:
@@ -217,7 +257,6 @@ with tab1:
             if escolha:
                 item_sel = df_prods[df_prods['display'] == escolha].iloc[0]
                 
-                # Atalhos de Pesquisa na Web para o item selecionado
                 termo_encoded = urllib.parse.quote(str(item_sel['nome']))
                 st.markdown(f"**🌐 Consultar Preço de Mercado na Web para:** `{item_sel['nome']}`")
                 c_web1, c_web2, c_web3 = st.columns(3)
@@ -230,7 +269,6 @@ with tab1:
                 
                 st.markdown("---")
                 
-                # Comparativo Histórico de Fornecedores do mesmo medicamento
                 df_mesmo_item = df_prods[df_prods['nome'] == item_sel['nome']]
                 if len(df_mesmo_item) > 1:
                     with st.expander("📦 Ver histórico de preços deste produto em outros fornecedores"):
@@ -242,7 +280,6 @@ with tab1:
                             'preco_venda': 'Preço Venda (R$)'
                         }), use_container_width=True)
 
-                # Opção de Venda: Caixa Fechada ou Fracionado por Unidade
                 tipo_venda = st.radio("Forma de Venda:", ["📦 Caixa Fechada", "💊 Fracionado / Por Unidade (Comprimido/Ampola)"], horizontal=True)
                 
                 custo_base_calc = float(item_sel['custo_unitario'])
@@ -329,15 +366,9 @@ with tab2:
     if not st.session_state.orcamento_itens:
         st.info("Nenhum item adicionado ao orçamento até o momento.")
     else:
-        # Campo do Nome do Cliente integrado ao estado
-        st.session_state.nome_cliente = st.text_input(
-            "👤 Nome do Cliente / Paciente:", 
-            value=st.session_state.nome_cliente, 
-            placeholder="Digite o nome completo do cliente..."
-        )
-        nome_cliente_final = st.session_state.nome_cliente.strip() if st.session_state.nome_cliente.strip() else "CLIENTE"
+        nome_digitado = st.text_input("👤 Nome do Cliente / Paciente:", placeholder="Digite o nome completo do cliente...", key="input_nome_cliente")
+        nome_cliente_final = nome_digitado.strip().upper() if nome_digitado.strip() else "CLIENTE"
 
-        # Ferramenta de Desconto / Reajuste Geral no Orçamento do Cliente
         with st.expander("⚡ Aplicar Desconto ou Reajuste em Massa no Orçamento", expanded=False):
             col_aj1, col_aj2, col_aj3 = st.columns([2, 1, 1])
             with col_aj1:
@@ -370,7 +401,6 @@ with tab2:
 
         st.markdown("##### Lista de Itens do Orçamento:")
         
-        # Tabela com botão de exclusão individual (🗑️)
         c_h1, c_h2, c_h3, c_h4, c_h5, c_h6 = st.columns([4, 1, 2, 2, 2, 1])
         c_h1.write("**Descrição**")
         c_h2.write("**Qtd**")
@@ -397,7 +427,6 @@ with tab2:
 
         st.markdown("---")
 
-        # Resumo Financeiro
         total_orcamento = sum(item['subtotal'] for item in st.session_state.orcamento_itens)
         total_custo = sum(item['custo_unit'] * item['qtd'] for item in st.session_state.orcamento_itens)
         lucro_estimado = total_orcamento - total_custo
@@ -409,7 +438,6 @@ with tab2:
         c_tot3.metric("Lucro Estimado", f"R$ {lucro_estimado:.2f}")
         c_tot4.metric("Margem Média da Venda", f"{margem_geral:.1f}%")
         
-        # Trava de Segurança / Alerta de Margem Baixa
         if margem_geral < 15.0:
             st.error(f"⚠️ **Atenção:** A margem de lucro desta venda está em **{margem_geral:.1f}%** (abaixo do piso de segurança recomendado de 15%).")
 
@@ -428,11 +456,9 @@ with tab2:
         with col_btn2:
             if st.button("🗑️ Limpar Todo o Orçamento", use_container_width=True):
                 st.session_state.orcamento_itens = []
-                st.session_state.nome_cliente = ""
                 st.toast("Orçamento esvaziado!")
                 st.rerun()
 
-        # Montagem do Link do WhatsApp
         msg_itens = "\n".join([f"- {item['qtd']}x {item['nome']}: R$ {item['subtotal']:.2f}" for item in st.session_state.orcamento_itens])
         texto_whatsapp = f"*ORÇAMENTO DE MEDICAMENTOS*\n\n*Cliente:* {nome_cliente_final}\n*Data:* {datetime.now().strftime('%d/%m/%Y')}\n\n*Itens:*\n{msg_itens}\n\n*VALOR TOTAL:* R$ {total_orcamento:.2f}\n\n_Validade da proposta: 7 dias._"
         whatsapp_url = f"https://api.whatsapp.com/send?text={urllib.parse.quote(texto_whatsapp)}"
@@ -441,7 +467,6 @@ with tab2:
         with col_act1:
             st.link_button("📲 Enviar Resumo pelo WhatsApp", whatsapp_url, use_container_width=True)
 
-        # Gerador de PDF Profissional
         def gerar_pdf(itens, cliente, total):
             pdf = PDFOrcamento()
             pdf.add_page()
@@ -548,18 +573,15 @@ with tab3:
             conn.close()
             if orc_row:
                 st.session_state.orcamento_itens = json.loads(orc_row['itens_json'])
-                st.session_state.nome_cliente = orc_row['cliente']
                 st.toast("✅ Orçamento carregado na aba Orçamento Atual!")
                 st.rerun()
 
 # ABA 4: Histórico Geral de Produtos
 with tab4:
     st.subheader("4. Histórico de Medicamentos Cadastrados")
-    conn = get_db_connection()
-    df_view = pd.read_sql_query("SELECT id, codigo, nome, fornecedor, custo_unitario, margem_lucro, preco_venda, data_entrada FROM produtos ORDER BY id DESC", conn)
-    conn.close()
+    df_view = carregar_produtos_cache()
     
     if not df_view.empty:
-        st.dataframe(df_view, use_container_width=True)
+        st.dataframe(df_view[['id', 'codigo', 'nome', 'fornecedor', 'custo_unitario', 'margem_lucro', 'preco_venda', 'data_entrada']], use_container_width=True)
     else:
         st.info("Nenhum dado cadastrado.")

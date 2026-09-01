@@ -362,7 +362,7 @@ with tab_orcamento:
                 subtotal_sem_desc = qtd_venda * preco_venda_unitario
                 subtotal_final_item = subtotal_sem_desc * (1 - (desconto_item / 100))
 
-                st.markdown(f"**Preço Unitário de Venda:** R$ {preco_venda_unitario:.2f} | **Subtotal do Item:** **R$ {subtotal_final_item:.2f}**")
+                st.write(f"**Preço Unitário de Venda:** R$ {preco_venda_unitario:.2f}  |  **Subtotal do Item:** R$ {subtotal_final_item:.2f}")
 
                 with col_btn:
                     st.write("")

@@ -8,37 +8,11 @@ from fpdf import FPDF
 from sqlalchemy import create_engine, text
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Sistema Comercial de Cotações & Vendas", layout="wide", page_icon="💼")
-
-# --- CONTROLE DE ACESSO ---
-USUARIO_CORRETO = "admin"
-SENHA_CORRETA = "farmacia123"
-
-def verificar_login():
-    if "autenticado" not in st.session_state:
-        st.session_state.autenticado = False
-
-    if not st.session_state.autenticado:
-        st.markdown("<h2 style='text-align: center; color: #1E3A8A;'>🔐 Acesso Restrito ao Sistema</h2>", unsafe_allow_html=True)
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            with st.form("login_form"):
-                usuario = st.text_input("Usuário")
-                senha = st.text_input("Senha", type="password")
-                entrar = st.form_submit_button("Entrar no Sistema", width="stretch")
-                
-                if entrar:
-                    if usuario == USUARIO_CORRETO and senha == SENHA_CORRETA:
-                        st.session_state.autenticado = True
-                        st.success("Login realizado com sucesso!")
-                        st.rerun()
-                    else:
-                        st.error("Usuário ou senha incorretos.")
-        return False
-    return True
-
-if not verificar_login():
-    st.stop()
+st.set_page_config(
+    page_title="Preço na Mão - Sistema Comercial de Cotações",
+    layout="wide",
+    page_icon="🏷️"
+)
 
 # --- CONEXÃO COM O BANCO DE DADOS (SUPABASE) ---
 @st.cache_resource
@@ -49,6 +23,62 @@ def get_engine():
     return None
 
 engine = get_engine()
+
+# --- FUNÇÕES DE AUTENTICAÇÃO DINÂMICA ---
+def buscar_usuario(usuario):
+    if engine:
+        try:
+            with engine.connect() as conn:
+                res = conn.execute(
+                    text("SELECT usuario, senha FROM usuarios WHERE usuario = :u"),
+                    {"u": usuario}
+                ).fetchone()
+                return res
+        except Exception:
+            pass
+    return None
+
+def alterar_senha_db(usuario, nova_senha):
+    if engine:
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE usuarios SET senha = :s WHERE usuario = :u"),
+                    {"s": nova_senha, "u": usuario}
+                )
+            return True
+        except Exception:
+            return False
+    return False
+
+def verificar_login():
+    if "autenticado" not in st.session_state:
+        st.session_state.autenticado = False
+        st.session_state.usuario_logado = ""
+
+    if not st.session_state.autenticado:
+        st.markdown("<h2 style='text-align: center; color: #1E3A8A;'>🔐 Preço na Mão - Acesso Restrito</h2>", unsafe_allow_html=True)
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            with st.form("login_form"):
+                usuario = st.text_input("Usuário")
+                senha = st.text_input("Senha", type="password")
+                entrar = st.form_submit_button("Entrar no Sistema", width="stretch")
+                
+                if entrar:
+                    dados_user = buscar_usuario(usuario.strip())
+                    if dados_user and dados_user[1] == senha:
+                        st.session_state.autenticado = True
+                        st.session_state.usuario_logado = usuario.strip()
+                        st.success("Login realizado com sucesso!")
+                        st.rerun()
+                    else:
+                        st.error("Usuário ou senha incorretos.")
+        return False
+    return True
+
+if not verificar_login():
+    st.stop()
 
 # --- FUNÇÕES DE BANCO DE DADOS ---
 @st.cache_data(ttl=600)
@@ -158,29 +188,52 @@ class PDFOrcamento(FPDF):
         self.set_y(-15)
         self.set_font('helvetica', 'I', 8)
         self.set_text_color(150, 150, 150)
-        self.cell(0, 10, f'Página {self.page_no()} | Emitido em {datetime.now().strftime("%d/%m/%Y %H:%M")}', align='C')
+        self.cell(0, 10, f'Página {self.page_no()} | Emitido via Preço na Mão em {datetime.now().strftime("%d/%m/%Y %H:%M")}', align='C')
 
 # --- CABEÇALHO SUPERIOR ---
 col_logo, col_logout = st.columns([8, 2])
 with col_logo:
-    st.title("💼 Balcão Integrado de Cotações & Gestão")
+    st.title("🏷️ Preço na Mão - Cotações & Vendas")
 with col_logout:
     if st.button("🚪 Sair da Conta"):
         st.session_state.autenticado = False
+        st.session_state.usuario_logado = ""
         st.session_state.ultimo_adicionado = None
         st.rerun()
 
 # --- BARRA LATERAL ---
 with st.sidebar:
-    st.markdown(f"👤 Operador: **{USUARIO_CORRETO}**")
+    st.markdown(f"👤 Operador: **{st.session_state.usuario_logado}**")
     if st.button("🚪 Sair / Desconectar", key="btn_sair_side"):
         st.session_state.autenticado = False
+        st.session_state.usuario_logado = ""
         st.session_state.ultimo_adicionado = None
         st.rerun()
 
     st.divider()
+    with st.expander("🔑 Alterar Minha Senha"):
+        with st.form("form_trocar_senha"):
+            senha_atual = st.text_input("Senha Atual", type="password")
+            nova_senha = st.text_input("Nova Senha", type="password")
+            confirma_nova = st.text_input("Confirmar Nova Senha", type="password")
+            
+            if st.form_submit_button("Salvar Nova Senha"):
+                dados = buscar_usuario(st.session_state.usuario_logado)
+                if not dados or dados[1] != senha_atual:
+                    st.error("A senha atual digitada está incorreta.")
+                elif len(nova_senha) < 4:
+                    st.error("A nova senha deve ter pelo menos 4 caracteres.")
+                elif nova_senha != confirma_nova:
+                    st.error("As novas senhas não coincidem.")
+                else:
+                    if alterar_senha_db(st.session_state.usuario_logado, nova_senha):
+                        st.success("Senha alterada com sucesso!")
+                    else:
+                        st.error("Erro ao atualizar a senha no banco.")
+
+    st.divider()
     with st.expander("🏢 Dados da Sua Empresa (Cabeçalho/PDF)"):
-        emp_nome = st.text_input("Razão Social / Nome Fantasia", value="Distribuidora & Comércio Geral")
+        emp_nome = st.text_input("Razão Social / Nome Fantasia", value="Minha Loja & Distribuição")
         emp_cnpj = st.text_input("CNPJ / CPF", value="00.000.000/0001-00")
         emp_tel = st.text_input("Telefone de Contato", value="(00) 00000-0000")
 
@@ -362,7 +415,6 @@ with tab_orcamento:
                 subtotal_sem_desc = qtd_venda * preco_venda_unitario
                 subtotal_final_item = subtotal_sem_desc * (1 - (desconto_item / 100))
 
-                # Exibição de valores sem risco de conflito com LaTeX
                 col_calc1, col_calc2 = st.columns(2)
                 with col_calc1:
                     st.markdown(f"**Preço Unitário de Venda:** R\\$ {preco_venda_unitario:.2f}")
@@ -393,7 +445,6 @@ with tab_orcamento:
             st.info("Nenhum produto cadastrado no catálogo.")
 
     # --- ITEM AVULSO / MANUAL ---
-    # --- ITEM AVULSO / MANUAL ---
     else:
         with st.container():
             col_av1, col_av2, col_av3 = st.columns([3, 2, 1])
@@ -410,7 +461,6 @@ with tab_orcamento:
             with col_av5:
                 av_desc = st.number_input("Desconto no Item (%):", min_value=0.0, max_value=100.0, value=0.0, step=1.0, key="av_desc")
             
-            # Opção para salvar no catálogo permanente
             salvar_no_catalogo = st.checkbox("💾 Salvar também este produto no Catálogo Geral permanente", value=True)
             
             av_subtotal = (av_qtd * av_valor_unit) * (1 - (av_desc / 100))
@@ -420,7 +470,6 @@ with tab_orcamento:
                 st.write("")
                 if st.button("➕ Adicionar Item Avulso", width="stretch", key="btn_add_avulso"):
                     if av_nome.strip():
-                        # Adiciona ao carrinho do orçamento
                         st.session_state.carrinho.append({
                             "nome": av_nome.strip(),
                             "tipo": av_tipo,
@@ -432,7 +481,6 @@ with tab_orcamento:
                             "subtotal": av_subtotal
                         })
                         
-                        # Se marcado, grava no banco Supabase
                         if salvar_no_catalogo:
                             df_novo_avulso = pd.DataFrame([{
                                 "nome": av_nome.strip(),
@@ -508,7 +556,7 @@ with tab_orcamento:
 
         with col_act2:
             if tel_cliente.strip():
-                msg = f"Olá *{nome_cliente}*! Segue o detalhamento do seu orçamento emitido por *{emp_nome}*:\n\n"
+                msg = f"Olá *{nome_cliente}*! Segue a cotação de *{emp_nome}* via Preço na Mão:\n\n"
                 for item in st.session_state.carrinho:
                     msg += f"• *{item['nome']}* ({item['qtd']} {item['tipo']}) - R$ {item['subtotal']:.2f}\n"
                 if desc_geral > 0:

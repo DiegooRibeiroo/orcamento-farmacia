@@ -393,6 +393,7 @@ with tab_orcamento:
             st.info("Nenhum produto cadastrado no catálogo.")
 
     # --- ITEM AVULSO / MANUAL ---
+    # --- ITEM AVULSO / MANUAL ---
     else:
         with st.container():
             col_av1, col_av2, col_av3 = st.columns([3, 2, 1])
@@ -409,6 +410,9 @@ with tab_orcamento:
             with col_av5:
                 av_desc = st.number_input("Desconto no Item (%):", min_value=0.0, max_value=100.0, value=0.0, step=1.0, key="av_desc")
             
+            # Opção para salvar no catálogo permanente
+            salvar_no_catalogo = st.checkbox("💾 Salvar também este produto no Catálogo Geral permanente", value=True)
+            
             av_subtotal = (av_qtd * av_valor_unit) * (1 - (av_desc / 100))
 
             with col_av6:
@@ -416,6 +420,7 @@ with tab_orcamento:
                 st.write("")
                 if st.button("➕ Adicionar Item Avulso", width="stretch", key="btn_add_avulso"):
                     if av_nome.strip():
+                        # Adiciona ao carrinho do orçamento
                         st.session_state.carrinho.append({
                             "nome": av_nome.strip(),
                             "tipo": av_tipo,
@@ -426,6 +431,19 @@ with tab_orcamento:
                             "desconto_pct": av_desc,
                             "subtotal": av_subtotal
                         })
+                        
+                        # Se marcado, grava no banco Supabase
+                        if salvar_no_catalogo:
+                            df_novo_avulso = pd.DataFrame([{
+                                "nome": av_nome.strip(),
+                                "apresentacao": av_tipo,
+                                "laboratorio": "Cadastro Manual",
+                                "unidades_caixa": 1,
+                                "preco_caixa": av_valor_unit,
+                                "preco_unitario": av_valor_unit
+                            }])
+                            salvar_produtos(df_novo_avulso)
+
                         st.session_state.ultimo_adicionado = f"{av_qtd}x {av_nome} - R$ {av_subtotal:.2f}"
                         st.toast(f"✅ Adicionado: {av_nome}", icon="🛒")
                         st.rerun()

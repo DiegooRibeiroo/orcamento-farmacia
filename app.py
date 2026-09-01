@@ -362,7 +362,12 @@ with tab_orcamento:
                 subtotal_sem_desc = qtd_venda * preco_venda_unitario
                 subtotal_final_item = subtotal_sem_desc * (1 - (desconto_item / 100))
 
-                st.write(f"**Preço Unitário de Venda:** R$ {preco_venda_unitario:.2f}  |  **Subtotal do Item:** R$ {subtotal_final_item:.2f}")
+                # Exibição de valores sem risco de conflito com LaTeX
+                col_calc1, col_calc2 = st.columns(2)
+                with col_calc1:
+                    st.markdown(f"**Preço Unitário de Venda:** R\\$ {preco_venda_unitario:.2f}")
+                with col_calc2:
+                    st.markdown(f"**Subtotal do Item:** :green[**R\\$ {subtotal_final_item:.2f}**]")
 
                 with col_btn:
                     st.write("")
@@ -450,7 +455,7 @@ with tab_orcamento:
             width="stretch"
         )
 
-        st.markdown(f"### Total da Proposta: :green[**R$ {total_liquido:.2f}**]")
+        st.markdown(f"### Total da Proposta: :green[**R\\$ {total_liquido:.2f}**]")
 
         st.divider()
         st.subheader("2. Identificação do Cliente & Finalização")
@@ -460,7 +465,6 @@ with tab_orcamento:
             opcoes_clientes = ["-- Digitar Novo / Balcão --"] + df_clientes["nome"].tolist()
             cliente_escolhido = st.selectbox("Buscar Cliente Cadastrado:", opcoes_clientes)
 
-        # Autopreenchimento
         nome_sugestao = "Cliente Balcão"
         tel_sugestao = ""
         if cliente_escolhido != "-- Digitar Novo / Balcão --":
@@ -563,14 +567,12 @@ with tab_historico:
                 c_h3.write(f"**Desconto Global:** {row['desconto_global']}%")
                 st.write(f"**Obs:** {row['observacoes']}")
                 
-                # Lista de itens em JSON
                 try:
                     itens_list = json.loads(row['itens']) if isinstance(row['itens'], str) else row['itens']
                     st.dataframe(pd.DataFrame(itens_list)[["nome", "tipo", "qtd", "unitario", "subtotal"]], width="stretch")
                 except Exception:
                     st.write(row['itens'])
                     
-                # Alterar Status
                 col_st1, col_st2 = st.columns([2, 4])
                 with col_st1:
                     novo_st = st.selectbox("Atualizar Status:", ["Pendente", "Aprovado", "Faturado", "Cancelado"], index=["Pendente", "Aprovado", "Faturado", "Cancelado"].index(row['status']) if row['status'] in ["Pendente", "Aprovado", "Faturado", "Cancelado"] else 0, key=f"st_{row['id']}")

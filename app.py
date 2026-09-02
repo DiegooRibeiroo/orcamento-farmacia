@@ -9,6 +9,10 @@ from fpdf import FPDF
 from sqlalchemy import create_engine, text
 from supabase import create_client, Client
 
+# --- FUNÇÃO AUXILIAR DE FORMATAÇÃO MONETÁRIA BRASILEIRA (R$) ---
+def formatar_moeda_br(valor: float) -> str:
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
     page_title="Preço na Mão - Sistema Comercial de Cotações",
@@ -43,7 +47,6 @@ def obter_email_por_identificador(identificador: str) -> str:
     ident = identificador.strip().lower()
     if "@" in ident:
         return ident
-    # Buscar e-mail associado ao username no banco
     if engine:
         try:
             with engine.connect() as conn:
@@ -147,7 +150,6 @@ def autenticar_usuario():
                         st.error(f"O nome de usuário '{novo_username}' já está em uso. Por favor, escolha outro.")
                     else:
                         try:
-                            # Criação nativa no Supabase Auth com metadados
                             res = supabase.auth.sign_up({
                                 "email": novo_email,
                                 "password": nova_senha,
@@ -482,7 +484,7 @@ with tab_orcamento:
                 escolha_id = st.selectbox(
                     "Selecione o produto:",
                     df_filtrado["id"].tolist(),
-                    format_func=lambda x: f"{df_filtrado[df_filtrado['id']==x]['nome'].values[0]} | Fornec: {df_filtrado[df_filtrado['id']==x]['laboratorio'].values[0]} | Custo: R$ {float(df_filtrado[df_filtrado['id']==x]['preco_caixa'].values[0]):.2f}"
+                    format_func=lambda x: f"{df_filtrado[df_filtrado['id']==x]['nome'].values[0]} | Fornec: {df_filtrado[df_filtrado['id']==x]['laboratorio'].values[0]} | Custo: {formatar_moeda_br(float(df_filtrado[df_filtrado['id']==x]['preco_caixa'].values[0]))}"
                 )
                 
                 prod_selecionado = df_filtrado[df_filtrado["id"] == escolha_id].iloc[0]
@@ -493,9 +495,9 @@ with tab_orcamento:
                 u_medida = prod_selecionado["apresentacao"]
 
                 c_info1, c_info2, c_info3, c_info4 = st.columns(4)
-                c_info1.info(f"**Custo Embalagem ({u_medida}):** R$ {custo_cx:.2f}")
+                c_info1.info(f"**Custo Embalagem ({u_medida}):** {formatar_moeda_br(custo_cx)}")
                 c_info2.info(f"**Itens p/ Embalagem:** {un_cx} un")
-                c_info3.info(f"**Custo Unitário:** R$ {custo_un:.2f}")
+                c_info3.info(f"**Custo Unitário:** {formatar_moeda_br(custo_un)}")
                 formato_venda = c_info4.radio("Formato de Venda:", [f"Embalagem Fechada ({u_medida})", "Fracionado (Unitário)"], horizontal=True)
 
                 col_qtd, col_margem, col_desc, col_btn = st.columns([2, 2, 2, 2])
@@ -513,9 +515,9 @@ with tab_orcamento:
 
                 col_calc1, col_calc2 = st.columns(2)
                 with col_calc1:
-                    st.markdown(f"**Preço Unitário de Venda:** R\\$ {preco_venda_unitario:.2f}")
+                    st.markdown(f"**Preço Unitário de Venda:** {formatar_moeda_br(preco_venda_unitario)}")
                 with col_calc2:
-                    st.markdown(f"**Subtotal do Item:** :green[**R\\$ {subtotal_final_item:.2f}**]")
+                    st.markdown(f"**Subtotal do Item:** :green[**{formatar_moeda_br(subtotal_final_item)}**]")
 
                 with col_btn:
                     st.write("")
@@ -532,7 +534,7 @@ with tab_orcamento:
                             "desconto_pct": desconto_item,
                             "subtotal": subtotal_final_item
                         })
-                        st.session_state.ultimo_adicionado = f"{qtd_venda}x {prod_selecionado['nome']} ({unidade_label}) - R$ {subtotal_final_item:.2f}"
+                        st.session_state.ultimo_adicionado = f"{qtd_venda}x {prod_selecionado['nome']} ({unidade_label}) - {formatar_moeda_br(subtotal_final_item)}"
                         st.toast(f"✅ Adicionado: {prod_selecionado['nome']}", icon="🛒")
                         st.rerun()
             else:
@@ -587,7 +589,7 @@ with tab_orcamento:
                             }])
                             salvar_produtos(df_novo_avulso)
 
-                        st.session_state.ultimo_adicionado = f"{av_qtd}x {av_nome} - R$ {av_subtotal:.2f}"
+                        st.session_state.ultimo_adicionado = f"{av_qtd}x {av_nome} - {formatar_moeda_br(av_subtotal)}"
                         st.toast(f"✅ Adicionado: {av_nome}", icon="🛒")
                         st.rerun()
                     else:
@@ -608,15 +610,18 @@ with tab_orcamento:
         total_com_desc_itens = sum(item["subtotal"] for item in st.session_state.carrinho)
         total_liquido = total_com_desc_itens * (1 - (desc_geral / 100))
 
+        # Exibição formatada em R$ (padrão brasileiro)
+        df_exibicao = df_carrinho.copy()
+        df_exibicao["Preço Unit. (R$)"] = df_exibicao["unitario"].apply(formatar_moeda_br)
+        df_exibicao["Subtotal (R$)"] = df_exibicao["subtotal"].apply(formatar_moeda_br)
+        df_exibicao["Desc %"] = df_exibicao["desconto_pct"].apply(lambda x: f"{x:.1f}%")
+
         st.dataframe(
-            df_carrinho.rename(columns={
-                "nome": "Item", "tipo": "Un.", "qtd": "Qtd",
-                "unitario": "Preço Unit. (R$)", "desconto_pct": "Desc %", "subtotal": "Subtotal (R$)"
-            })[["Item", "Un.", "Qtd", "Preço Unit. (R$)", "Desc %", "Subtotal (R$)"]],
+            df_exibicao.rename(columns={"nome": "Item", "tipo": "Un.", "qtd": "Qtd"})[["Item", "Un.", "Qtd", "Preço Unit. (R$)", "Desc %", "Subtotal (R$)"]],
             use_container_width=True
         )
 
-        st.markdown(f"### Total da Proposta: :green[**R\\$ {total_liquido:.2f}**]")
+        st.markdown(f"### Total da Proposta: :green[**{formatar_moeda_br(total_liquido)}**]")
 
         st.divider()
         st.subheader("2. Identificação do Cliente & Finalização")
@@ -653,10 +658,10 @@ with tab_orcamento:
             if tel_cliente.strip():
                 msg = f"Olá *{nome_cliente}*! Segue a cotação de *{emp_nome}* via Preço na Mão:\n\n"
                 for item in st.session_state.carrinho:
-                    msg += f"• *{item['nome']}* ({item['qtd']} {item['tipo']}) - R$ {item['subtotal']:.2f}\n"
+                    msg += f"• *{item['nome']}* ({item['qtd']} {item['tipo']}) - {formatar_moeda_br(item['subtotal'])}\n"
                 if desc_geral > 0:
                     msg += f"\n*Desconto Comercial:* {desc_geral}%\n"
-                msg += f"\n💰 *Total da Proposta: R$ {total_liquido:.2f}*\n\n_{obs_orcamento}_"
+                msg += f"\n💰 *Total da Proposta: {formatar_moeda_br(total_liquido)}*\n\n_{obs_orcamento}_"
                 link_zap = f"https://wa.me/{tel_cliente.strip()}?text={urllib.parse.quote(msg)}"
                 st.markdown(f"<a href='{link_zap}' target='_blank' style='display:inline-block;padding:10px 10px;background-color:#25D366;color:white;text-decoration:none;border-radius:6px;font-weight:bold;text-align:center;width:100%;'>📲 WhatsApp</a>", unsafe_allow_html=True)
             else:
@@ -687,13 +692,13 @@ with tab_orcamento:
                     pdf.cell(90, 6, nome_rec, border=1)
                     pdf.cell(20, 6, str(it['tipo']), border=1, align='C')
                     pdf.cell(20, 6, str(it['qtd']), border=1, align='C')
-                    pdf.cell(30, 6, f"R$ {it['unitario']:.2f}", border=1, align='R')
-                    pdf.cell(30, 6, f"R$ {it['subtotal']:.2f}", border=1, align='R')
+                    pdf.cell(30, 6, formatar_moeda_br(it['unitario']), border=1, align='R')
+                    pdf.cell(30, 6, formatar_moeda_br(it['subtotal']), border=1, align='R')
                     pdf.ln(6)
 
                 pdf.ln(4)
                 pdf.set_font('helvetica', 'B', 11)
-                pdf.cell(0, 7, f"TOTAL: R$ {total_liquido:.2f}", align='R', ln=True)
+                pdf.cell(0, 7, f"TOTAL: {formatar_moeda_br(total_liquido)}", align='R', ln=True)
 
                 pdf_bytes = bytes(pdf.output())
                 st.download_button(
@@ -721,7 +726,7 @@ with tab_historico:
     
     if not df_orc.empty:
         for idx, row in df_orc.iterrows():
-            with st.expander(f"📌 Orçamento #{row['id']} - {row['cliente_nome']} | R$ {float(row['total']):.2f} [{row['status']}]"):
+            with st.expander(f"📌 Orçamento #{row['id']} - {row['cliente_nome']} | {formatar_moeda_br(float(row['total']))} [{row['status']}]"):
                 c_h1, c_h2, c_h3 = st.columns([3, 2, 2])
                 c_h1.write(f"**Data:** {pd.to_datetime(row['criado_em']).strftime('%d/%m/%Y %H:%M')}")
                 c_h2.write(f"**Telefone:** {row['cliente_telefone']}")
@@ -730,7 +735,11 @@ with tab_historico:
                 
                 try:
                     itens_list = json.loads(row['itens']) if isinstance(row['itens'], str) else row['itens']
-                    st.dataframe(pd.DataFrame(itens_list)[["nome", "tipo", "qtd", "unitario", "subtotal"]], use_container_width=True)
+                    df_it = pd.DataFrame(itens_list)
+                    if not df_it.empty and "subtotal" in df_it.columns:
+                        df_it["unitario"] = df_it["unitario"].apply(formatar_moeda_br)
+                        df_it["subtotal"] = df_it["subtotal"].apply(formatar_moeda_br)
+                    st.dataframe(df_it[["nome", "tipo", "qtd", "unitario", "subtotal"]], use_container_width=True)
                 except Exception:
                     st.write(row['itens'])
                     
@@ -771,6 +780,11 @@ with tab_clientes:
 with tab_catalogo:
     st.subheader("📦 Catálogo Geral de Produtos & Preços (Supabase)")
     if not df_prods.empty:
-        st.dataframe(df_prods, use_container_width=True)
+        df_prods_view = df_prods.copy()
+        if "preco_caixa" in df_prods_view.columns:
+            df_prods_view["preco_caixa"] = df_prods_view["preco_caixa"].apply(lambda x: formatar_moeda_br(float(x)))
+        if "preco_unitario" in df_prods_view.columns:
+            df_prods_view["preco_unitario"] = df_prods_view["preco_unitario"].apply(lambda x: formatar_moeda_br(float(x)))
+        st.dataframe(df_prods_view, use_container_width=True)
     else:
         st.info("Nenhum item cadastrado no banco de dados.")

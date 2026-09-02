@@ -1,6 +1,7 @@
 streamlit
 pandas
-fpdf2
 xmltodict
+fpdf2
+SQLAlchemy
 psycopg2-binary
-sqlalchemy
+supabase

@@ -6,6 +6,7 @@ from datetime import datetime
 import urllib.parse
 from fpdf import FPDF
 from sqlalchemy import create_engine, text
+from supabase import create_client, Client
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -14,73 +15,109 @@ st.set_page_config(
     page_icon="🏷️"
 )
 
-# --- CONEXÃO COM O BANCO DE DADOS (SUPABASE) ---
+# --- CLIENTES DE BANCO E AUTENTICAÇÃO ---
 @st.cache_resource
 def get_engine():
     if "DATABASE_URL" in st.secrets:
-        db_url = st.secrets["DATABASE_URL"]
-        return create_engine(db_url, pool_pre_ping=True, pool_size=5, max_overflow=10)
+        return create_engine(st.secrets["DATABASE_URL"], pool_pre_ping=True, pool_size=5, max_overflow=10)
+    return None
+
+@st.cache_resource
+def get_supabase_client() -> Client:
+    url = st.secrets.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY")
+    if url and key:
+        return create_client(url, key)
     return None
 
 engine = get_engine()
+supabase = get_supabase_client()
 
-# --- FUNÇÕES DE AUTENTICAÇÃO DINÂMICA ---
-def buscar_usuario(usuario):
-    if engine:
-        try:
-            with engine.connect() as conn:
-                res = conn.execute(
-                    text("SELECT usuario, senha FROM usuarios WHERE usuario = :u"),
-                    {"u": usuario}
-                ).fetchone()
-                return res
-        except Exception:
-            pass
-    return None
-
-def alterar_senha_db(usuario, nova_senha):
-    if engine:
-        try:
-            with engine.begin() as conn:
-                conn.execute(
-                    text("UPDATE usuarios SET senha = :s WHERE usuario = :u"),
-                    {"s": nova_senha, "u": usuario}
-                )
-            return True
-        except Exception:
-            return False
-    return False
-
-def verificar_login():
+# --- CONTROLE DE AUTENTICAÇÃO COM SUPABASE AUTH ---
+def autenticar_usuario():
     if "autenticado" not in st.session_state:
         st.session_state.autenticado = False
-        st.session_state.usuario_logado = ""
+        st.session_state.usuario_email = ""
 
-    if not st.session_state.autenticado:
-        st.markdown("<h2 style='text-align: center; color: #1E3A8A;'>🔐 Preço na Mão - Acesso Restrito</h2>", unsafe_allow_html=True)
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            with st.form("login_form"):
-                usuario = st.text_input("Usuário")
+    if st.session_state.autenticado:
+        return True
+
+    st.markdown("<h2 style='text-align: center; color: #1E3A8A;'>🏷️ Preço na Mão</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #64748B;'>Acesse com sua conta ou registre-se para utilizar o sistema.</p>", unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        tab_login, tab_cadastro, tab_recuperar = st.tabs(["🔑 Entrar", "✨ Criar Conta", "✉️ Esqueci a Senha"])
+
+        # 1. ABA DE LOGIN
+        with tab_login:
+            with st.form("form_login"):
+                email = st.text_input("E-mail")
                 senha = st.text_input("Senha", type="password")
-                entrar = st.form_submit_button("Entrar no Sistema", width="stretch")
-                
-                if entrar:
-                    dados_user = buscar_usuario(usuario.strip())
-                    if dados_user and dados_user[1] == senha:
-                        st.session_state.autenticado = True
-                        st.session_state.usuario_logado = usuario.strip()
-                        st.success("Login realizado com sucesso!")
-                        st.rerun()
-                    else:
-                        st.error("Usuário ou senha incorretos.")
-        return False
-    return True
+                btn_entrar = st.form_submit_button("Acessar Plataforma", use_container_width=True)
 
-if not verificar_login():
+                if btn_entrar:
+                    if not email or not senha:
+                        st.warning("Preencha o e-mail e a senha.")
+                    else:
+                        try:
+                            res = supabase.auth.sign_in_with_password({"email": email.strip(), "password": senha})
+                            st.session_state.autenticado = True
+                            st.session_state.usuario_email = res.user.email
+                            st.success("Acesso autorizado!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error("E-mail ou senha inválidos. Verifique suas credenciais.")
+
+        # 2. ABA DE NOVO CADASTRO
+        with tab_cadastro:
+            with st.form("form_cadastro"):
+                novo_email = st.text_input("Seu E-mail")
+                nova_senha = st.text_input("Crie uma Senha (mínimo 6 caracteres)", type="password")
+                confirma_senha = st.text_input("Confirme sua Senha", type="password")
+                btn_cadastrar = st.form_submit_button("Criar Minha Conta", use_container_width=True)
+
+                if btn_cadastrar:
+                    if not novo_email or not nova_senha:
+                        st.warning("Preencha todos os campos.")
+                    elif len(nova_senha) < 6:
+                        st.error("A senha deve conter no mínimo 6 caracteres.")
+                    elif nova_senha != confirma_senha:
+                        st.error("As senhas digitadas não coincidem.")
+                    else:
+                        try:
+                            supabase.auth.sign_up({"email": novo_email.strip(), "password": nova_senha})
+                            st.success("Conta criada com sucesso! Verifique a caixa de entrada do seu e-mail para confirmar seu acesso.")
+                        except Exception as e:
+                            msg_erro = str(e)
+                            if "already registered" in msg_erro.lower() or "unique" in msg_erro.lower():
+                                st.error("Este e-mail já está cadastrado no sistema. Tente fazer login ou recuperar a senha.")
+                            else:
+                                st.error(f"Não foi possível criar a conta: {msg_erro}")
+
+        # 3. ABA DE RECUPERAÇÃO DE SENHA
+        with tab_recuperar:
+            with st.form("form_recuperar"):
+                st.caption("Insira o e-mail cadastrado para enviarmos as instruções de redefinição.")
+                email_rec = st.text_input("E-mail Cadastrado")
+                btn_rec = st.form_submit_button("Enviar Link de Recuperação", use_container_width=True)
+
+                if btn_rec:
+                    if not email_rec:
+                        st.warning("Por favor, digite seu e-mail.")
+                    else:
+                        try:
+                            supabase.auth.reset_password_for_email(email_rec.strip())
+                            st.success("Se o e-mail estiver cadastrado, um link de redefinição de senha foi enviado para sua caixa de entrada!")
+                        except Exception as e:
+                            st.error(f"Erro ao solicitar redefinição: {e}")
+
+    return False
+
+if not autenticar_usuario():
     st.stop()
 
-# --- FUNÇÕES DE BANCO DE DADOS ---
+# --- FUNÇÕES DE BANCO DE DADOS (POSTGRESQL) ---
 @st.cache_data(ttl=600)
 def carregar_produtos():
     if engine:
@@ -160,7 +197,7 @@ if "ultimo_adicionado" not in st.session_state:
 df_prods = carregar_produtos()
 df_clientes = carregar_clientes()
 
-# --- CLASSE PARA GERAR PDF PERSONALIZADO ---
+# --- GERADOR DE PDF ---
 class PDFOrcamento(FPDF):
     def __init__(self, emp_nome, emp_cnpj, emp_tel):
         super().__init__()
@@ -196,40 +233,23 @@ with col_logo:
     st.title("🏷️ Preço na Mão - Cotações & Vendas")
 with col_logout:
     if st.button("🚪 Sair da Conta"):
+        supabase.auth.sign_out()
         st.session_state.autenticado = False
-        st.session_state.usuario_logado = ""
+        st.session_state.usuario_email = ""
+        st.session_state.carrinho = []
         st.session_state.ultimo_adicionado = None
         st.rerun()
 
 # --- BARRA LATERAL ---
 with st.sidebar:
-    st.markdown(f"👤 Operador: **{st.session_state.usuario_logado}**")
+    st.markdown(f"👤 Conectado como:\n**{st.session_state.usuario_email}**")
     if st.button("🚪 Sair / Desconectar", key="btn_sair_side"):
+        supabase.auth.sign_out()
         st.session_state.autenticado = False
-        st.session_state.usuario_logado = ""
+        st.session_state.usuario_email = ""
+        st.session_state.carrinho = []
         st.session_state.ultimo_adicionado = None
         st.rerun()
-
-    st.divider()
-    with st.expander("🔑 Alterar Minha Senha"):
-        with st.form("form_trocar_senha"):
-            senha_atual = st.text_input("Senha Atual", type="password")
-            nova_senha = st.text_input("Nova Senha", type="password")
-            confirma_nova = st.text_input("Confirmar Nova Senha", type="password")
-            
-            if st.form_submit_button("Salvar Nova Senha"):
-                dados = buscar_usuario(st.session_state.usuario_logado)
-                if not dados or dados[1] != senha_atual:
-                    st.error("A senha atual digitada está incorreta.")
-                elif len(nova_senha) < 4:
-                    st.error("A nova senha deve ter pelo menos 4 caracteres.")
-                elif nova_senha != confirma_nova:
-                    st.error("As novas senhas não coincidem.")
-                else:
-                    if alterar_senha_db(st.session_state.usuario_logado, nova_senha):
-                        st.success("Senha alterada com sucesso!")
-                    else:
-                        st.error("Erro ao atualizar a senha no banco.")
 
     st.divider()
     with st.expander("🏢 Dados da Sua Empresa (Cabeçalho/PDF)"):
@@ -241,7 +261,7 @@ with st.sidebar:
     st.subheader("📥 Importação de Notas (XML)")
     xml_files = st.file_uploader("Upload de arquivos XML (NF-e)", type=["xml"], accept_multiple_files=True)
     
-    if xml_files and st.button("Processar e Salvar no Catálogo", width="stretch"):
+    if xml_files and st.button("Processar e Salvar no Catálogo", use_container_width=True):
         produtos_importados = []
         for xml_file in xml_files:
             try:
@@ -306,14 +326,14 @@ with st.sidebar:
                 data=csv,
                 file_name=f"catalogo_backup_{datetime.now().strftime('%d%m%Y')}.csv",
                 mime="text/csv",
-                width="stretch"
+                use_container_width=True
             )
             
-        if st.button("🔄 Atualizar Cache Geral", width="stretch"):
+        if st.button("🔄 Atualizar Cache Geral", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
-        if st.button("🧹 Remover Itens Duplicados", width="stretch"):
+        if st.button("🧹 Remover Itens Duplicados", use_container_width=True):
             if engine:
                 try:
                     with engine.begin() as conn:
@@ -424,7 +444,7 @@ with tab_orcamento:
                 with col_btn:
                     st.write("")
                     st.write("")
-                    if st.button("➕ Adicionar à Cotação", width="stretch", key="btn_add_db"):
+                    if st.button("➕ Adicionar à Cotação", use_container_width=True, key="btn_add_db"):
                         unidade_label = u_medida if "Fechada" in formato_venda else "un"
                         st.session_state.carrinho.append({
                             "nome": prod_selecionado["nome"],
@@ -462,13 +482,12 @@ with tab_orcamento:
                 av_desc = st.number_input("Desconto no Item (%):", min_value=0.0, max_value=100.0, value=0.0, step=1.0, key="av_desc")
             
             salvar_no_catalogo = st.checkbox("💾 Salvar também este produto no Catálogo Geral permanente", value=True)
-            
             av_subtotal = (av_qtd * av_valor_unit) * (1 - (av_desc / 100))
 
             with col_av6:
                 st.write("")
                 st.write("")
-                if st.button("➕ Adicionar Item Avulso", width="stretch", key="btn_add_avulso"):
+                if st.button("➕ Adicionar Item Avulso", use_container_width=True, key="btn_add_avulso"):
                     if av_nome.strip():
                         st.session_state.carrinho.append({
                             "nome": av_nome.strip(),
@@ -518,7 +537,7 @@ with tab_orcamento:
                 "nome": "Item", "tipo": "Un.", "qtd": "Qtd",
                 "unitario": "Preço Unit. (R$)", "desconto_pct": "Desc %", "subtotal": "Subtotal (R$)"
             })[["Item", "Un.", "Qtd", "Preço Unit. (R$)", "Desc %", "Subtotal (R$)"]],
-            width="stretch"
+            use_container_width=True
         )
 
         st.markdown(f"### Total da Proposta: :green[**R\\$ {total_liquido:.2f}**]")
@@ -549,7 +568,7 @@ with tab_orcamento:
         col_act1, col_act2, col_act3, col_act4 = st.columns(4)
         
         with col_act1:
-            if st.button("💾 Salvar Cotação no Histórico", type="primary", width="stretch"):
+            if st.button("💾 Salvar Cotação no Histórico", type="primary", use_container_width=True):
                 salvar_orcamento_db(nome_cliente, tel_cliente, total_liquido, desc_geral, st.session_state.carrinho, obs_orcamento)
                 st.success("✅ Orçamento salvo com sucesso!")
                 st.rerun()
@@ -606,13 +625,13 @@ with tab_orcamento:
                     data=pdf_bytes,
                     file_name=f"proposta_{datetime.now().strftime('%d%m%Y_%H%M')}.pdf",
                     mime="application/pdf",
-                    width="stretch"
+                    use_container_width=True
                 )
             except Exception as e:
                 st.error(f"Erro no PDF: {e}")
 
         with col_act4:
-            if st.button("🗑️ Limpar Carrinho", width="stretch"):
+            if st.button("🗑️ Limpar Carrinho", use_container_width=True):
                 st.session_state.carrinho = []
                 st.session_state.ultimo_adicionado = None
                 st.rerun()
@@ -635,7 +654,7 @@ with tab_historico:
                 
                 try:
                     itens_list = json.loads(row['itens']) if isinstance(row['itens'], str) else row['itens']
-                    st.dataframe(pd.DataFrame(itens_list)[["nome", "tipo", "qtd", "unitario", "subtotal"]], width="stretch")
+                    st.dataframe(pd.DataFrame(itens_list)[["nome", "tipo", "qtd", "unitario", "subtotal"]], use_container_width=True)
                 except Exception:
                     st.write(row['itens'])
                     
@@ -666,7 +685,7 @@ with tab_clientes:
                 st.rerun()
 
     if not df_clientes.empty:
-        st.dataframe(df_clientes[["id", "nome", "telefone", "documento"]], width="stretch")
+        st.dataframe(df_clientes[["id", "nome", "telefone", "documento"]], use_container_width=True)
     else:
         st.info("Nenhum cliente cadastrado ainda.")
 
@@ -676,6 +695,6 @@ with tab_clientes:
 with tab_catalogo:
     st.subheader("📦 Catálogo Geral de Produtos & Preços (Supabase)")
     if not df_prods.empty:
-        st.dataframe(df_prods, width="stretch")
+        st.dataframe(df_prods, use_container_width=True)
     else:
         st.info("Nenhum item cadastrado no banco de dados.")

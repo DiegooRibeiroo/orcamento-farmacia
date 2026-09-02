@@ -4,6 +4,7 @@ import xmltodict
 import json
 from datetime import datetime
 import urllib.parse
+import re
 from fpdf import FPDF
 from sqlalchemy import create_engine, text
 from supabase import create_client, Client
@@ -33,10 +34,58 @@ def get_supabase_client() -> Client:
 engine = get_engine()
 supabase = get_supabase_client()
 
-# --- CONTROLE DE AUTENTICAÇÃO COM SUPABASE AUTH ---
+# --- FUNÇÕES AUXILIARES DE USUÁRIO / EMAIL ---
+def validar_formato_email(email: str) -> bool:
+    padrao = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+    return bool(re.match(padrao, email.strip()))
+
+def obter_email_por_identificador(identificador: str) -> str:
+    ident = identificador.strip().lower()
+    if "@" in ident:
+        return ident
+    # Buscar e-mail associado ao username no banco
+    if engine:
+        try:
+            with engine.connect() as conn:
+                res = conn.execute(
+                    text("SELECT email FROM perfis_usuarios WHERE LOWER(username) = :u"),
+                    {"u": ident}
+                ).fetchone()
+                if res:
+                    return res[0]
+        except Exception:
+            pass
+    return ident
+
+def usuario_ja_existe(username: str) -> bool:
+    if engine:
+        try:
+            with engine.connect() as conn:
+                res = conn.execute(
+                    text("SELECT 1 FROM perfis_usuarios WHERE LOWER(username) = :u"),
+                    {"u": username.strip().lower()}
+                ).fetchone()
+                return res is not None
+        except Exception:
+            pass
+    return False
+
+def vincular_perfil(user_id: str, username: str, email: str):
+    if engine:
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("INSERT INTO perfis_usuarios (id, username, email) VALUES (:id, :u, :e) ON CONFLICT DO NOTHING"),
+                    {"id": user_id, "u": username.strip().lower(), "e": email.strip().lower()}
+                )
+        except Exception:
+            pass
+
+# --- CONTROLE DE AUTENTICAÇÃO HÍBRIDO ---
 def autenticar_usuario():
     if "autenticado" not in st.session_state:
         st.session_state.autenticado = False
+        st.session_state.usuario_logado = ""
         st.session_state.usuario_email = ""
 
     if st.session_state.autenticado:
@@ -49,68 +98,93 @@ def autenticar_usuario():
     with col2:
         tab_login, tab_cadastro, tab_recuperar = st.tabs(["🔑 Entrar", "✨ Criar Conta", "✉️ Esqueci a Senha"])
 
-        # 1. ABA DE LOGIN
+        # 1. ABA DE LOGIN (E-mail ou Usuário)
         with tab_login:
             with st.form("form_login"):
-                email = st.text_input("E-mail")
+                login_id = st.text_input("Usuário ou E-mail")
                 senha = st.text_input("Senha", type="password")
                 btn_entrar = st.form_submit_button("Acessar Plataforma", use_container_width=True)
 
                 if btn_entrar:
-                    if not email or not senha:
-                        st.warning("Preencha o e-mail e a senha.")
+                    if not login_id or not senha:
+                        st.warning("Preencha todos os campos.")
                     else:
+                        email_final = obter_email_por_identificador(login_id)
                         try:
-                            res = supabase.auth.sign_in_with_password({"email": email.strip(), "password": senha})
+                            res = supabase.auth.sign_in_with_password({"email": email_final, "password": senha})
                             st.session_state.autenticado = True
                             st.session_state.usuario_email = res.user.email
+                            st.session_state.usuario_logado = login_id.strip()
                             st.success("Acesso autorizado!")
                             st.rerun()
-                        except Exception as e:
-                            st.error("E-mail ou senha inválidos. Verifique suas credenciais.")
+                        except Exception:
+                            st.error("Usuário/E-mail ou senha incorretos. Verifique suas credenciais.")
 
         # 2. ABA DE NOVO CADASTRO
         with tab_cadastro:
             with st.form("form_cadastro"):
-                novo_email = st.text_input("Seu E-mail")
-                nova_senha = st.text_input("Crie uma Senha (mínimo 6 caracteres)", type="password")
-                confirma_senha = st.text_input("Confirme sua Senha", type="password")
+                novo_username = st.text_input("Nome de Usuário (Apelido para login)")
+                novo_email = st.text_input("Seu E-mail Válido (para confirmação e recuperação)")
+                nova_senha = st.text_input("Crie uma Senha (mínimo 6 dígitos)", type="password")
+                confirma_senha = st.text_input("Confirme a Senha", type="password")
                 btn_cadastrar = st.form_submit_button("Criar Minha Conta", use_container_width=True)
 
                 if btn_cadastrar:
-                    if not novo_email or not nova_senha:
-                        st.warning("Preencha todos os campos.")
+                    novo_username = novo_username.strip().lower()
+                    novo_email = novo_email.strip().lower()
+
+                    if not novo_username or not novo_email or not nova_senha:
+                        st.warning("Preencha todos os campos obrigatórios.")
+                    elif len(novo_username) < 3:
+                        st.error("O nome de usuário deve ter no mínimo 3 caracteres.")
+                    elif not validar_formato_email(novo_email):
+                        st.error("Por favor, digite um formato de e-mail válido (ex: seuemail@dominio.com).")
                     elif len(nova_senha) < 6:
                         st.error("A senha deve conter no mínimo 6 caracteres.")
                     elif nova_senha != confirma_senha:
                         st.error("As senhas digitadas não coincidem.")
+                    elif usuario_ja_existe(novo_username):
+                        st.error(f"O nome de usuário '{novo_username}' já está em uso. Por favor, escolha outro.")
                     else:
                         try:
-                            supabase.auth.sign_up({"email": novo_email.strip(), "password": nova_senha})
-                            st.success("Conta criada com sucesso! Verifique a caixa de entrada do seu e-mail para confirmar seu acesso.")
+                            # Criação nativa no Supabase Auth com metadados
+                            res = supabase.auth.sign_up({
+                                "email": novo_email,
+                                "password": nova_senha,
+                                "options": {
+                                    "data": {"username": novo_username}
+                                }
+                            })
+                            if res.user:
+                                vincular_perfil(res.user.id, novo_username, novo_email)
+                            st.success("✅ Conta criada com sucesso! Verifique seu e-mail para confirmar a ativação.")
                         except Exception as e:
                             msg_erro = str(e)
                             if "already registered" in msg_erro.lower() or "unique" in msg_erro.lower():
-                                st.error("Este e-mail já está cadastrado no sistema. Tente fazer login ou recuperar a senha.")
+                                st.error("Este e-mail já possui cadastro no sistema. Tente fazer login ou recuperar a senha.")
                             else:
-                                st.error(f"Não foi possível criar a conta: {msg_erro}")
+                                st.error(f"Erro ao criar conta: {msg_erro}")
 
         # 3. ABA DE RECUPERAÇÃO DE SENHA
         with tab_recuperar:
             with st.form("form_recuperar"):
-                st.caption("Insira o e-mail cadastrado para enviarmos as instruções de redefinição.")
-                email_rec = st.text_input("E-mail Cadastrado")
+                st.caption("Digite seu e-mail cadastrado ou seu nome de usuário para enviarmos as instruções.")
+                rec_id = st.text_input("E-mail ou Usuário Cadastrado")
                 btn_rec = st.form_submit_button("Enviar Link de Recuperação", use_container_width=True)
 
                 if btn_rec:
-                    if not email_rec:
-                        st.warning("Por favor, digite seu e-mail.")
+                    if not rec_id:
+                        st.warning("Por favor, preencha este campo.")
                     else:
-                        try:
-                            supabase.auth.reset_password_for_email(email_rec.strip())
-                            st.success("Se o e-mail estiver cadastrado, um link de redefinição de senha foi enviado para sua caixa de entrada!")
-                        except Exception as e:
-                            st.error(f"Erro ao solicitar redefinição: {e}")
+                        email_recuperacao = obter_email_por_identificador(rec_id)
+                        if not validar_formato_email(email_recuperacao):
+                            st.error("Não localizamos um e-mail válido associado a este usuário.")
+                        else:
+                            try:
+                                supabase.auth.reset_password_for_email(email_recuperacao)
+                                st.success(f"Link de redefinição enviado para o e-mail cadastrado!")
+                            except Exception as e:
+                                st.error(f"Erro ao solicitar link: {e}")
 
     return False
 
@@ -235,6 +309,7 @@ with col_logout:
     if st.button("🚪 Sair da Conta"):
         supabase.auth.sign_out()
         st.session_state.autenticado = False
+        st.session_state.usuario_logado = ""
         st.session_state.usuario_email = ""
         st.session_state.carrinho = []
         st.session_state.ultimo_adicionado = None
@@ -242,10 +317,11 @@ with col_logout:
 
 # --- BARRA LATERAL ---
 with st.sidebar:
-    st.markdown(f"👤 Conectado como:\n**{st.session_state.usuario_email}**")
+    st.markdown(f"👤 Conectado como:\n**{st.session_state.usuario_logado or st.session_state.usuario_email}**")
     if st.button("🚪 Sair / Desconectar", key="btn_sair_side"):
         supabase.auth.sign_out()
         st.session_state.autenticado = False
+        st.session_state.usuario_logado = ""
         st.session_state.usuario_email = ""
         st.session_state.carrinho = []
         st.session_state.ultimo_adicionado = None
